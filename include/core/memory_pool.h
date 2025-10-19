@@ -20,45 +20,62 @@ public:
     }
     
     void* allocate(size_t size) {
+        // 如果请求的大小超过块大小，直接使用系统分配
         if (size > BlockSize) {
             void* p = nullptr;
             size_t align = alignof(std::max_align_t);
-            // posix_memalign: size can be any value; align must be power of two and multiple of sizeof(void*)
             if (posix_memalign(&p, align, size) != 0) {
                 return nullptr;
             }
             return p;
         }
         
+        // 尝试从池中分配
         std::lock_guard<std::mutex> lock(mutex_);
         
+        // 如果没有空闲块，分配新chunk
         if (free_blocks_.empty()) {
             if (!allocate_chunk()) {
                 return nullptr;
             }
         }
         
+        // 从空闲块列表中取出一个块
         void* ptr = free_blocks_.back();
         free_blocks_.pop_back();
         allocated_blocks_.fetch_add(1, std::memory_order_relaxed);
+        
         return ptr;
     }
     
-    void deallocate(void* ptr, size_t size) {
+    void deallocate(void* ptr, [[maybe_unused]] size_t size) {
         if (!ptr) return;
         
-        if (size > BlockSize) {
-            std::free(ptr);
-            return;
+        // 检查这个指针是否属于我们的池
+        std::lock_guard<std::mutex> lock(mutex_);
+        
+        // 检查ptr是否在我们的chunks范围内
+        bool is_from_pool = false;
+        for (void* chunk : chunks_) {
+            char* chunk_start = static_cast<char*>(chunk);
+            char* chunk_end = chunk_start + BlockSize * blocks_per_chunk_;
+            if (ptr >= chunk_start && ptr < chunk_end) {
+                // 计算块索引
+                size_t offset = static_cast<char*>(ptr) - chunk_start;
+                if (offset % BlockSize == 0) {
+                    is_from_pool = true;
+                    break;
+                }
+            }
         }
         
-        std::lock_guard<std::mutex> lock(mutex_);
-        free_blocks_.push_back(ptr);
-        allocated_blocks_.fetch_sub(1, std::memory_order_relaxed);
-        
-        // 如果空闲块过多，释放一些内存
-        if (free_blocks_.size() > max_free_blocks_) {
-            shrink_pool();
+        if (is_from_pool && free_blocks_.size() < max_free_blocks_) {
+            // 放回池中重用
+            free_blocks_.push_back(ptr);
+            allocated_blocks_.fetch_sub(1, std::memory_order_relaxed);
+        } else {
+            // 不是池中的内存或池已满，直接释放
+            std::free(ptr);
         }
     }
     

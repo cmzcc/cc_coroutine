@@ -1,152 +1,146 @@
-# Modern C++20 协程库
+# modern_coro — 现代 C++20 协程库（中文文档）
 
-[![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)](https://en.cppreference.com/w/cpp/20)
-[![CMake](https://img.shields.io/badge/CMake-3.16%2B-green.svg)](https://cmake.org/)
-[![Platform](https://img.shields.io/badge/Platform-Linux-lightgrey.svg)](https://www.linux.org/)
-[![Tests](https://img.shields.io/badge/Tests-Passing-brightgreen.svg)]()
-[![Coverage](https://img.shields.io/badge/Coverage-85%25-green.svg)]()
+简短说明
+-----------------
+modern_coro 是一个以 C++20 协程为核心的轻量级并发与异步 I/O 库，目标是提供可组合的 Task、可扩展的调度器、以及对 Linux 下高性能 I/O（基于 epoll）的友好支持。库同时提供在 epoll 不可用时的回退策略（线程阻塞执行），以保证在受限环境的可用性。
 
-一个高性能、类型安全的现代C++20协程库，提供完整的异步编程解决方案。支持协程调度、异步IO、定时器、Hook机制、协程安全和取消机制。
+适用场景
+- 高并发网络服务器原型与实验
+- 协程编程学习与工程化实践
+- 需要简单可扩展调度器 + 协程友好 I/O 的项目
 
-## 📊 快速概览
+本 README 包含：快速上手、构建与运行、核心设计注意事项（包含 epoll 回退与线程上下文）、API 快照、常见问题与调试建议。
 
-- **协程类型**: 基于标准 C++20 `std::coroutine_handle`
-- **调度器**: 基础调度器 + 高级调度器 + 工作窃取调度器
-- **异步IO**: epoll-based 高性能网络编程
-- **安全性**: RAII 资源管理 + 异常安全包装
-- **取消机制**: 完整的协程取消和超时支持
-- **测试覆盖**: 85%+ 代码覆盖率，包含单元测试和集成测试
+先决条件
+-------------
+- Linux（推荐 Ubuntu 系列）
+- 支持 C++20 的编译器（GCC 11+/Clang 14+ 推荐）
+- CMake 3.16+
+- pthread（系统库）
 
-## ✨ 核心特性
+构建与运行
+----------------
+推荐使用项目自带的构建脚本：
 
-### 🚀 协程系统
-- **标准C++20协程** - 基于`std::coroutine`实现，完全符合标准
-- **类型安全** - 模板化`Task<T>`设计，编译期类型检查
-- **异常安全** - 完整的异常传播和处理机制
-- **生命周期管理** - 自动化协程生命周期和资源管理
-- **协程取消** - 支持协程取消和超时机制
-
-### ⚡ 高性能调度
-- **多线程调度器** - 支持可配置的工作线程池
-- **优先级调度** - 四级任务优先级（CRITICAL/HIGH/NORMAL/LOW）
-- **工作窃取算法** - 自动负载均衡，最大化CPU利用率
-- **高级调度器** - 支持统计信息和性能监控
-- **零拷贝设计** - 最小化内存拷贝开销
-
-### 🌐 异步IO系统
-- **基于epoll** - Linux高性能事件驱动IO
-- **协程友好** - 所有IO操作都是协程可等待的
-- **文件描述符管理** - 完整的FD生命周期和超时控制
-- **网络编程支持** - TCP/UDP套接字异步操作
-
-### ⏰ 精确定时器
-- **高精度定时** - 基于`std::chrono`的纳秒级精度
-- **最小堆实现** - 高效的定时器队列管理
-- **协程集成** - `co_await`语法的睡眠和定时操作
-
-### 🔧 Hook机制
-- **透明转换** - 自动将同步IO转换为异步操作
-- **运行时控制** - 可动态启用/禁用Hook功能
-- **兼容性** - 与现有同步代码无缝集成
-
-### 🛡️ 安全特性
-- **异常安全包装器** - `SafeCoroutineWrapper`提供异常处理
-- **协程取消机制** - 支持优雅的协程取消和超时
-- **生命周期管理** - `AdvancedCoroutineLifecycleManager`提供完整的协程监控
-- **内存安全** - 自动资源管理和内存池支持
-
-## 📋 系统要求
-
-| 组件 | 最低版本 | 推荐版本 |
-|------|----------|----------|
-| **操作系统** | Ubuntu 20.04 LTS | Ubuntu 22.04 LTS |
-| **编译器** | GCC 11.0 / Clang 14.0 | GCC 12.0+ / Clang 15.0+ |
-| **CMake** | 3.16 | 3.25+ |
-| **CPU架构** | x86_64 | x86_64 |
-
-### 依赖库
-- `pthread` - POSIX线程库
-- `dl` - 动态链接库
-
-## 🛠️ 快速开始
-
-### 1. 获取源码
 ```bash
-git clone <repository-url>
-cd modern_coro
-```
-
-### 2. 构建项目
-```bash
-# 使用自动构建脚本（推荐）
 chmod +x build.sh
 ./build.sh
+```
 
-# 或手动构建
-mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
+该脚本会创建 `build/`、运行 CMake，然后并行构建库、示例与测试。构建完成后：
+
+- 库文件：`build/libmodern_coro.so*`
+- 单元测试可执行：`build/tests/unit_tests`
+- 集成测试可执行：`build/tests/integration_tests`
+
+手动构建（可选）：
+
+```bash
+mkdir -p build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=RelWithDebInfo
 make -j$(nproc)
 ```
 
-### 3. 运行示例
-```bash
-# 在build目录中运行
-./modern_coro_example
+运行测试：
 
-# 或从项目根目录运行
-cd .. && ./build/modern_coro_example
-```
-
-### 4. 运行测试
 ```bash
-# 构建测试
 cd build
-make -j$(nproc)
-
-# 运行单元测试
+ctest -V
+# 或直接运行
 ./tests/unit_tests
-
-# 运行集成测试
 ./tests/integration_tests
-
-# 运行所有测试
-ctest
 ```
 
-### 5. 安装到系统（可选）
-```bash
-cd build
-sudo make install
-```
-
-## 📖 使用指南
-
-## 📖 API 参考
-
-### 核心类型
-
-#### Task<T>
-协程任务的返回值类型。
+快速示例（最小服务器）
+-----------------------
+下面是一个简化的伪代码示例，展示如何启动 `IOManager` 并使用 `async_accept/async_read/async_write`：
 
 ```cpp
-template<typename T = void>
-class Task {
-public:
-    // 创建协程任务
-    Task<T> some_async_operation();
-    
-    // 等待任务完成
-    T result = co_await some_async_operation();
-    
-    // 检查任务是否就绪
-    bool ready() const;
-    
-    // 阻塞等待结果（不推荐在协程中使用）
-    T get();
-};
+auto io_mgr = std::make_unique<modern_coro::IOManager>(2);
+std::thread io_thread([&]{ io_mgr->start(); });
+
+// 在调度器内创建服务器协程
+io_mgr->schedule(run_echo_server(io_mgr.get(), 8888, server_running));
+
+// 停止
+io_mgr->stop();
+if (io_thread.joinable()) io_thread.join();
 ```
 
-#### 调度器类型
+核心设计与注意事项（务必阅读）
+---------------------------------
+
+1) epoll 优先，线程回退策略
+- `IOManager` 优先创建 `epoll` 文件描述符（epoll_create1）。
+- 如果 `epoll` 创建失败或在运行中出现不可恢复的 epoll 操作错误，库会回退到“同步模式”（内部通过 `epfd == -1` 标记）。
+- 在同步模式下，异步 API（`async_read`/`async_write`/`async_accept`/`async_connect`）仍旧可用，但内部会把阻塞系统调用包装到独立线程（`std::async`）中执行，以避免阻塞调度器线程。
+
+2) 为什么要小心 fd 的管理顺序？
+- 在 epoll 模式下，必须在第一次注册到 epoll 前正确判断 fd 是否已在内部上下文表中，否则会把 `EPOLL_CTL_MOD` 用到未加入 epoll 的 fd 上（会导致 ENOENT/`No such file or directory`）。
+- 实现中要避免以下反模式：先用 `operator[]` 创建上下文条目然后再检查 `find(fd)`。先做 `find`，再在需要时创建条目。
+
+3) Socket 阶段性状态和非阻塞模式
+- 当在 epoll 模式中等待 I/O 时，库会尝试把 socket 设为非阻塞（`fcntl`）。
+- 在同步回退模式中，库不会强制把外部传入 socket 改为阻塞或非阻塞——这由调用方决定；库会在独立线程中执行阻塞调用。
+
+4) 协程恢复的线程上下文
+- 在 epoll 模式下，IO 线程获得事件后会直接 resume 保存的 `std::coroutine_handle<>`，确保协程在正确的上下文中继续执行。若需要把恢复移回某个调度器线程，需在 resume 时把协程调度回目标调度器。
+
+5) 性能注意
+- epoll（edge-triggered）需要在读取/写入时尽量循环直到 EAGAIN，以减少事件丢失和重复唤醒。
+- 同步回退模式性能较差，仅用于不可用 epoll 的兼容场景或测试环境。
+
+常见问题与调试建议
+----------------------
+
+- 日志信息：库在关键分支会打印错误/调试信息到 stderr/stdout（例如 `Failed to manage epoll event: ...`）。这些信息能帮助你判断是否进入了回退模式或是否存在 fd 注册顺序问题。
+- 如果看到 `epoll_ctl failed (modify fd in epoll): No such file or directory`：通常说明实现中在决定 ADD/MOD 时的判断有问题（见第2点）。
+- AsyncAccept 在集成测试中卡住：常见原因是在同一线程上既运行了调度器又做了阻塞连接，测试示例应把客户端放在独立线程或确保 epoll 可用。
+
+API 快照（常用函数）
+------------------
+
+- IOManager
+    - `explicit IOManager(size_t thread_count = std::thread::hardware_concurrency())`
+    - `void start()` — 启动内部调度/IO线程。
+    - `void stop()` — 停止并清理资源。
+    - `Task<ssize_t> async_read(int fd, void* buf, size_t sz)`
+    - `Task<ssize_t> async_write(int fd, const void* buf, size_t sz)`
+    - `Task<int> async_accept(int listen_fd)`
+    - `Task<int> async_connect(int sockfd, const sockaddr* addr, socklen_t addrlen)`
+    - `bool is_sync_mode() const` — 是否处于 epoll 回退的同步模式
+
+- Scheduler / Task
+    - `Scheduler::schedule(Task<...>)` — 提交协程任务到调度器
+
+测试与验证
+----------------
+项目带有单元测试和集成测试（基于 GoogleTest）。构建脚本会自动编译并可运行所有测试。若在 CI / 容器中运行测试时看到 epoll 相关错误，请：
+
+1. 检查容器是否限制了 epoll（某些轻量容器/限制环境可能不完整）；
+2. 将测试客户端放到独立线程以避免与调度器线程竞争；
+3. 启用调试输出以定位问题（参见测试输出中的 `[IO]` / `Failed to manage epoll event` 日志）。
+
+贡献
+----------------
+
+- 欢迎提交 issue / pull request。请包含可复现步骤与最小示例。
+- 对于涉及 IO 管理、调度器或内存池的改动，请同时添加相应的测试。
+
+未来改进建议
+--------------------
+
+- 可配置的日志级别（INFO/DEBUG/ERROR）并引入日志库（例如 spdlog）；
+- 增加其他平台的替代 I/O 实现（kqueue、IOCP）；
+- 将同步回退模式的线程池替换为可配置线程池以优化性能；
+- 提供更多示例（HTTP/Proxy/Benchmarks）。
+
+联系方式
+--------------------
+如需帮助或提交 PR，请在仓库中创建 issue 或直接发起 pull request。
+
+——
+如果你希望我把 README 中的示例拆成 `examples/` 可运行程序或添加更详细的 API 表格（Doxygen），我可以继续实现并提交到仓库。
 
 | 调度器 | 用途 | 特性 |
 |--------|------|------|

@@ -154,8 +154,74 @@ Task<void> client_test(IOManager* io_mgr, int port, std::atomic<bool>& completed
 }
 
 // 测试异步 accept 功能
-TEST_F(EchoServerTest, DISABLED_AsyncAccept) {
-    // 异步accept测试存在协程生命周期管理问题，暂时禁用
-    // 需要进一步调查epoll事件处理和协程恢复的线程上下文问题
-    GTEST_SKIP() << "Async accept test disabled due to coroutine lifecycle issues";
+TEST_F(EchoServerTest, AsyncAccept) {
+    const int test_port = 8888;
+
+    // 启动调度器
+    start_scheduler();
+
+    // 等待调度器启动
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // 启动服务器协程
+    auto server_task = run_echo_server(io_manager_.get(), test_port, server_running_);
+    io_manager_->schedule(std::move(server_task));
+
+    // 等待服务器启动
+    for (int i = 0; i < 100 && !server_running_.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_TRUE(server_running_.load()) << "Server failed to start";
+
+    // 在主线程中运行客户端测试，避免在同步模式下的死锁
+    std::thread client_thread([this, test_port]() {
+        // 创建客户端连接
+        int client_fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (client_fd == -1) {
+            return;
+        }
+        
+        sockaddr_in server_addr{};
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+        server_addr.sin_port = htons(test_port);
+        
+        if (connect(client_fd, (sockaddr*)&server_addr, sizeof(server_addr)) != 0) {
+            close(client_fd);
+            return;
+        }
+        
+        const char* test_message = "Hello, Async Echo Server!";
+        size_t msg_len = strlen(test_message);
+        
+        // 发送数据
+        ssize_t sent = write(client_fd, test_message, msg_len);
+        if (sent != static_cast<ssize_t>(msg_len)) {
+            close(client_fd);
+            return;
+        }
+        
+        // 读取回显
+        char buffer[1024] = {0};
+        ssize_t read_len = read(client_fd, buffer, sizeof(buffer));
+        if (read_len == static_cast<ssize_t>(msg_len) && strcmp(buffer, test_message) == 0) {
+            // 测试成功
+            test_completed_ = true;
+        }
+        
+        close(client_fd);
+    });
+    
+    client_thread.join();
+
+    // 验证测试结果
+    EXPECT_TRUE(test_completed_.load()) << "Echo test did not complete successfully";
+
+    // 停止服务器
+    server_running_ = false;
+    io_manager_->stop();
+
+    if (server_thread_.joinable()) {
+        server_thread_.join();
+    }
 }

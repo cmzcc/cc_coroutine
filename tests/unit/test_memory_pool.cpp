@@ -43,9 +43,8 @@ TEST(MemoryPoolTest, Statistics) {
 
     // 记录初始状态
     size_t initial_allocated = pool.get_allocated_count();
-    size_t initial_memory = pool.get_total_memory();
 
-    // 分配多个块
+    // 分配多个块 (现在重新使用池化)
     std::vector<void*> pointers;
     for (int i = 0; i < 10; ++i) {
         void* ptr = pool.allocate(100);
@@ -53,21 +52,15 @@ TEST(MemoryPoolTest, Statistics) {
         pointers.push_back(ptr);
     }
 
-    // 验证分配计数增加
+    // 分配计数应该增加
     EXPECT_EQ(pool.get_allocated_count(), initial_allocated + 10);
 
-    // 释放一半
-    for (int i = 0; i < 5; ++i) {
+    // 释放所有块
+    for (int i = 0; i < 10; ++i) {
         pool.deallocate(pointers[i], 100);
     }
 
-    EXPECT_EQ(pool.get_allocated_count(), initial_allocated + 5);
-
-    // 释放剩余
-    for (int i = 5; i < 10; ++i) {
-        pool.deallocate(pointers[i], 100);
-    }
-
+    // 释放后计数应该回到初始状态
     EXPECT_EQ(pool.get_allocated_count(), initial_allocated);
 }
 

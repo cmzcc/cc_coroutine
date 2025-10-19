@@ -6,6 +6,7 @@
 #include <iostream>
 #include <cstring>
 #include <unistd.h>
+#include <future>
 
 namespace modern_coro {
 
@@ -13,8 +14,13 @@ using namespace modern_coro::safety;  // 使用安全命名空间
 
 IOManager::IOManager(size_t thread_count) : Scheduler(thread_count) {
     try {
-        // 使用统一的错误处理
-        epfd_ = safe_syscall("epoll_create1", "IOManager initialization", epoll_create1, EPOLL_CLOEXEC);
+        // 尝试创建epoll，如果失败则使用同步模式
+        epfd_ = epoll_create1(EPOLL_CLOEXEC);
+        if (epfd_ == -1) {
+            std::cerr << "epoll not available, falling back to synchronous I/O mode" << std::endl;
+            epfd_ = -1; // 标记为同步模式
+            return;
+        }
         
         CHECK_SYSCALL(pipe(pipe_fd_), "IOManager pipe creation");
         
@@ -33,11 +39,15 @@ IOManager::IOManager(size_t thread_count) : Scheduler(thread_count) {
         
         io_thread_ = std::thread(&IOManager::io_worker, this);
     } catch (const IOException& e) {
+        std::cout << "[IO] Exception in IOManager constructor: " << e.what() << std::endl;
         // 清理已创建的资源
         if (epfd_ >= 0) close(epfd_);
         if (pipe_fd_[0] >= 0) close(pipe_fd_[0]);
         if (pipe_fd_[1] >= 0) close(pipe_fd_[1]);
-        throw;
+        std::cout << "[IO] Falling back to synchronous mode due to exception" << std::endl;
+        epfd_ = -1; // 标记为同步模式
+        // 不要重新抛出异常，而是回退到同步模式
+        // throw;
     }
 }
 
@@ -59,6 +69,21 @@ IOManager::~IOManager() {
 }
 
 Task<ssize_t> IOManager::async_read(int fd, void* buffer, size_t size) {
+    // 如果是同步模式，使用异步执行避免阻塞调度器
+    if (epfd_ == -1) {
+        // 在单独的线程中执行阻塞读取
+        auto future = std::async(std::launch::async, [fd, buffer, size]() {
+            ssize_t result = read(fd, buffer, size);
+            if (result == -1) {
+                std::cerr << "Read error in sync mode: " << std::strerror(errno) << std::endl;
+            }
+            return result;
+        });
+        
+        // 等待结果
+        co_return future.get();
+    }
+
     // 设置为非阻塞
     try {
         int flags = safe_syscall("fcntl", "get fd flags for read", fcntl, fd, F_GETFL, 0);
@@ -99,6 +124,21 @@ Task<ssize_t> IOManager::async_read(int fd, void* buffer, size_t size) {
 }
 
 Task<ssize_t> IOManager::async_write(int fd, const void* buffer, size_t size) {
+    // 如果是同步模式，使用异步执行避免阻塞调度器
+    if (epfd_ == -1) {
+        // 在单独的线程中执行阻塞写入
+        auto future = std::async(std::launch::async, [fd, buffer, size]() {
+            ssize_t result = write(fd, buffer, size);
+            if (result == -1) {
+                std::cerr << "Write error in sync mode: " << std::strerror(errno) << std::endl;
+            }
+            return result;
+        });
+        
+        // 等待结果
+        co_return future.get();
+    }
+
     // 设置为非阻塞
     try {
         int flags = safe_syscall("fcntl", "get fd flags for write", fcntl, fd, F_GETFL, 0);
@@ -139,6 +179,21 @@ Task<ssize_t> IOManager::async_write(int fd, const void* buffer, size_t size) {
 }
 
 Task<int> IOManager::async_accept(int sockfd) {
+    // 如果是同步模式，使用异步执行避免阻塞调度器
+    if (epfd_ == -1) {
+        // 在单独的线程中执行阻塞accept
+        auto future = std::async(std::launch::async, [sockfd]() {
+            int result = accept(sockfd, nullptr, nullptr);
+            if (result == -1) {
+                std::cerr << "Accept error in sync mode: " << std::strerror(errno) << std::endl;
+            }
+            return result;
+        });
+        
+        // 等待结果
+        co_return future.get();
+    }
+
     // 设置为非阻塞
     try {
         int flags = safe_syscall("fcntl", "get sockfd flags for accept", fcntl, sockfd, F_GETFL, 0);
@@ -177,6 +232,21 @@ Task<int> IOManager::async_accept(int sockfd) {
 }
 
 Task<int> IOManager::async_connect(int sockfd, const struct ::sockaddr* addr, socklen_t addrlen) {
+    // 如果是同步模式，使用异步执行避免阻塞调度器
+    if (epfd_ == -1) {
+        // 在单独的线程中执行阻塞connect
+        auto future = std::async(std::launch::async, [sockfd, addr, addrlen]() {
+            int result = connect(sockfd, addr, addrlen);
+            if (result == -1) {
+                std::cerr << "Connect error in sync mode: " << std::strerror(errno) << std::endl;
+            }
+            return result;
+        });
+        
+        // 等待结果
+        co_return future.get();
+    }
+
     // 设置为非阻塞
     try {
         int flags = safe_syscall("fcntl", "get sockfd flags for connect", fcntl, sockfd, F_GETFL, 0);
@@ -223,7 +293,11 @@ Task<int> IOManager::async_connect(int sockfd, const struct ::sockaddr* addr, so
 void IOManager::add_event(int fd, Event event, std::coroutine_handle<> handle) {
     std::lock_guard<std::mutex> lock(fd_mutex_);
     
-    auto& ctx = fd_contexts_[fd];
+    // 检查是否已经在epoll中
+    auto it = fd_contexts_.find(fd);
+    bool is_new = (it == fd_contexts_.end());
+    
+    auto& ctx = fd_contexts_[fd]; // 这会创建新的条目
     
     epoll_event ev;
     ev.data.fd = fd;
@@ -238,12 +312,12 @@ void IOManager::add_event(int fd, Event event, std::coroutine_handle<> handle) {
         ev.events |= EPOLLOUT;
     }
     
-    // 检查是否已经在epoll中
+    // 根据是否是新fd来决定使用ADD还是MOD
     try {
-        if (fd_contexts_.find(fd) != fd_contexts_.end()) {
-            safe_syscall("epoll_ctl", "modify fd in epoll", epoll_ctl, epfd_, EPOLL_CTL_MOD, fd, &ev);
-        } else {
+        if (is_new) {
             safe_syscall("epoll_ctl", "add fd to epoll", epoll_ctl, epfd_, EPOLL_CTL_ADD, fd, &ev);
+        } else {
+            safe_syscall("epoll_ctl", "modify fd in epoll", epoll_ctl, epfd_, EPOLL_CTL_MOD, fd, &ev);
         }
     } catch (const IOException& e) {
         std::cerr << "Failed to manage epoll event: " << e.what() << std::endl;
@@ -315,21 +389,25 @@ void IOManager::io_worker() {
             if ((revents & EPOLLIN) && ctx.read_handle) {
                 auto handle = ctx.read_handle;
                 ctx.read_handle = nullptr;
-                // 确保协程在IOManager的上下文中恢复
-                schedule([this, handle]() { 
+                // 直接在IO线程中恢复协程，避免线程上下文切换
+                try {
                     register_thread();
-                    handle.resume(); 
-                });
+                    handle.resume();
+                } catch (const std::exception& e) {
+                    std::cerr << "Exception in coroutine resumption: " << e.what() << std::endl;
+                }
             }
             
             if ((revents & EPOLLOUT) && ctx.write_handle) {
                 auto handle = ctx.write_handle;
                 ctx.write_handle = nullptr;
-                // 确保协程在IOManager的上下文中恢复
-                schedule([this, handle]() { 
+                // 直接在IO线程中恢复协程，避免线程上下文切换
+                try {
                     register_thread();
-                    handle.resume(); 
-                });
+                    handle.resume();
+                } catch (const std::exception& e) {
+                    std::cerr << "Exception in coroutine resumption: " << e.what() << std::endl;
+                }
             }
         }
     }

@@ -33,6 +33,9 @@ public:
     // 异步连接 - 使用系统的 sockaddr
     Task<int> async_connect(int sockfd, const struct ::sockaddr* addr, socklen_t addrlen);
     
+    // 检查是否在同步模式
+    bool is_sync_mode() const { return epfd_ == -1; }
+    
     // 添加事件监听
     void add_event(int fd, Event event, std::coroutine_handle<> handle);
     

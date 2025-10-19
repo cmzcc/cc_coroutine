@@ -112,45 +112,29 @@ public:
 
         final_awaiter final_suspend() noexcept { 
             auto handle = std::coroutine_handle<promise_type>::from_promise(*this);
-            std::cout << "[DEBUG] promise_type::final_suspend - handle: " << handle.address() << std::endl;
-            std::cout.flush();
             
-            try {
-                // 从 CoroutineLifecycleManager 注销
-                std::cout << "[DEBUG] promise_type::final_suspend - Unregistering from CoroutineLifecycleManager" << std::endl;
-                std::cout.flush();
-                unregister_coroutine_with_lifecycle_manager(handle);
+            // 从 CoroutineLifecycleManager 注销
+            unregister_coroutine_with_lifecycle_manager(handle);
 
-                // 从 AdvancedCoroutineLifecycleManager 注销
-                std::cout << "[DEBUG] promise_type::final_suspend - Unregistering from AdvancedCoroutineLifecycleManager" << std::endl;
-                std::cout.flush();
-                cancellation::AdvancedCoroutineLifecycleManager::unregister_coroutine(handle);
+            // 从 AdvancedCoroutineLifecycleManager 注销
+            cancellation::AdvancedCoroutineLifecycleManager::unregister_coroutine(handle);
 
-                // 在final_suspend中减少计数器，确保只减少一次
-                bool was_counted = counted_.exchange(false, std::memory_order_acq_rel);
-                std::cout << "[DEBUG] promise_type::final_suspend - was_counted: " << was_counted << std::endl;
-                std::cout.flush();
-                if (was_counted) {
-                    try {
-                        // 使用保存的调度器指针来减少计数器，避免thread_local问题
-                        if (scheduler_ptr_) {
-                            std::cout << "[DEBUG] promise_type::final_suspend - Decrementing on scheduler: " << scheduler_ptr_ << std::endl;
-                            decrement_active_coroutines_on_scheduler(scheduler_ptr_);
-                        } else {
-                            std::cout << "[DEBUG] promise_type::final_suspend - Decrementing on current scheduler" << std::endl;
-                            decrement_active_coroutines_on_current_scheduler();
-                        }
-                    } catch (...) {
-                        std::cout << "[DEBUG] promise_type::final_suspend - Exception during counter decrement" << std::endl;
-                        // 即使减少计数器失败，也要确保协程能够正常完成
+            // 在final_suspend中减少计数器，确保只减少一次
+            bool was_counted = counted_.exchange(false, std::memory_order_acq_rel);
+            if (was_counted) {
+                try {
+                    // 使用保存的调度器指针来减少计数器，避免thread_local问题
+                    if (scheduler_ptr_) {
+                        decrement_active_coroutines_on_scheduler(scheduler_ptr_);
+                    } else {
+                        decrement_active_coroutines_on_current_scheduler();
                     }
+                } catch (...) {
+                    // 即使减少计数器失败，也要确保协程能够正常完成
                 }
-                // 打破自持有循环
-                keep_alive_.reset();
-                std::cout << "[DEBUG] promise_type::final_suspend - Completed" << std::endl;
-            } catch (...) {
-                std::cout << "[DEBUG] promise_type::final_suspend - Exception in final_suspend" << std::endl;
             }
+            // 打破自持有循环
+            keep_alive_.reset();
             return {}; 
         }
         
@@ -172,14 +156,6 @@ public:
         std::atomic<bool> destroyed{false};
 
         SharedState(handle_type h) : handle(h) {}
-
-        // 使用对象池优化分配/释放
-        static void* operator new(size_t sz) {
-            return MemoryPool<4096>::instance().allocate(sz);
-        }
-        static void operator delete(void* p, size_t sz) {
-            MemoryPool<4096>::instance().deallocate(p, sz);
-        }
 
         void add_ref() { 
             ref_count.fetch_add(1, std::memory_order_relaxed);
@@ -228,7 +204,6 @@ public:
     }
     
     ~Task() {
-        std::cout << "[DEBUG] Task destructor called, state: " << (state_ ? state_.get() : nullptr) << std::endl;
         // SharedState会自动管理生命周期
     }
     
@@ -394,6 +369,7 @@ public:
     Scheduler* scheduler_ptr_;  // 保存创建时的调度器指针
     // 保持自持有
     std::shared_ptr<void> keep_alive_{};
+    char dummy[4] = {0};  // 为了对齐
     };
     
     using handle_type = std::coroutine_handle<promise_type>;
@@ -404,14 +380,6 @@ public:
         std::atomic<bool> destroyed{false};
 
         SharedState(handle_type h) : handle(h) {}
-
-        // 使用对象池优化分配/释放
-        static void* operator new(size_t sz) {
-            return MemoryPool<4096>::instance().allocate(sz);
-        }
-        static void operator delete(void* p, size_t sz) {
-            MemoryPool<4096>::instance().deallocate(p, sz);
-        }
 
         void add_ref() { ref_count.fetch_add(1, std::memory_order_relaxed); }
         void release() {

@@ -27,36 +27,29 @@ public:
     template<typename Func, typename... Args>
     static AsyncTask from_sync(Func&& func, Args&&... args) {
         auto state = std::make_shared<SharedState>();
-        std::cout << "[DEBUG] AsyncTask::from_sync - Created state: " << state.get() << std::endl;
         
         // 在当前线程中捕获调度器指针，避免在新线程中访问 thread_local 变量
         modern_coro::Scheduler* current_scheduler = modern_coro::get_current_scheduler_ptr();
-        std::cout << "[DEBUG] AsyncTask::from_sync - Current scheduler: " << current_scheduler << std::endl;
         
         // 始终使用异步执行，避免竞态条件
         // 使用 shared_ptr 的拷贝而不是移动，确保状态指针正确传递
         std::thread([state_copy = state, current_scheduler,
                      func = std::forward<Func>(func),
                      ... args = std::forward<Args>(args)]() mutable {
-            std::cout << "[DEBUG] AsyncTask::from_sync - Thread started, state: " << state_copy.get() << std::endl;
             try {
                 if constexpr (std::is_void_v<T>) {
                     std::invoke(std::move(func), std::move(args)...);
-                    std::cout << "[DEBUG] AsyncTask::from_sync - Void function completed" << std::endl;
                     set_value(state_copy, ValueType{}, current_scheduler);
                 } else {
                     auto value = std::invoke(std::move(func), std::move(args)...);
-                    std::cout << "[DEBUG] AsyncTask::from_sync - Function completed with value: " << value << std::endl;
                     set_value(state_copy, ValueType(std::move(value)), current_scheduler);
                 }
             } catch (...) {
-                std::cout << "[DEBUG] AsyncTask::from_sync - Exception caught" << std::endl;
                 set_exception(state_copy, std::current_exception(), current_scheduler);
             }
         }).detach();
         
         AsyncTask result(std::move(state));
-        std::cout << "[DEBUG] AsyncTask::from_sync - Returning AsyncTask with state: " << result.state_.get() << std::endl;
         return result;
     }
 
@@ -82,23 +75,21 @@ public:
     }
 
     static AsyncTask from_future(std::future<T>&& future) {
-        auto state = std::make_shared<SharedState>();
-        // 在当前线程中捕获调度器指针
-        modern_coro::Scheduler* current_scheduler = modern_coro::get_current_scheduler_ptr();
-        std::thread([state, current_scheduler, fut = std::move(future)]() mutable {
-            try {
-                if constexpr (std::is_void_v<T>) {
-                    fut.get();
-                    set_value(state, ValueType{}, current_scheduler);
-                } else {
-                    auto value = fut.get();
-                    set_value(state, ValueType(std::move(value)), current_scheduler);
+        return from_callback([fut = std::move(future)](auto callback) mutable {
+            std::thread([callback = std::move(callback), fut = std::move(fut)]() mutable {
+                try {
+                    if constexpr (std::is_void_v<T>) {
+                        fut.get();
+                        callback();
+                    } else {
+                        auto value = fut.get();
+                        callback(std::move(value));
+                    }
+                } catch (...) {
+                    // For now, ignore exceptions in callback version
                 }
-            } catch (...) {
-                set_exception(state, std::current_exception(), current_scheduler);
-            }
-        }).detach();
-        return AsyncTask(std::move(state));
+            }).detach();
+        });
     }
 
     Task<T> to_coroutine() && {
@@ -111,24 +102,25 @@ public:
     }
 
     bool await_ready() const noexcept {
-        std::cout << "[DEBUG] AsyncTask::await_ready - state: " << state_.get() << std::endl;
         if (!state_) {
-            std::cout << "[DEBUG] AsyncTask::await_ready - state is null, returning true" << std::endl;
             return true; // 如果 state 为空，直接返回 ready
         }
         bool ready = state_->completed.load(std::memory_order_acquire);
-        std::cout << "[DEBUG] AsyncTask::await_ready - completed: " << ready << std::endl;
         return ready;
     }
 
-    void await_suspend(std::coroutine_handle<> continuation) {
-        std::cout << "[DEBUG] AsyncTask::await_suspend - state: " << state_.get() << ", continuation: " << continuation.address() << std::endl;
+    bool ready() const noexcept {
         if (!state_) {
-            std::cout << "[DEBUG] AsyncTask::await_suspend - state is null, scheduling direct resume" << std::endl;
+            return true;
+        }
+        return state_->completed.load(std::memory_order_acquire);
+    }
+
+    void await_suspend(std::coroutine_handle<> continuation) {
+        if (!state_) {
             // 如果 state 为空，直接恢复协程
             modern_coro::schedule_coroutine_task([continuation]() mutable {
                 if (continuation) {
-                    std::cout << "[DEBUG] AsyncTask::await_suspend - Resuming continuation (null state)" << std::endl;
                     continuation.resume();
                 }
             });
@@ -136,14 +128,11 @@ public:
         }
         
         modern_coro::Scheduler* scheduler = modern_coro::get_current_scheduler_ptr();
-        std::cout << "[DEBUG] AsyncTask::await_suspend - scheduler: " << scheduler << std::endl;
         if (!register_continuation(state_, continuation, scheduler)) {
-            std::cout << "[DEBUG] AsyncTask::await_suspend - Task already completed, resuming immediately" << std::endl;
             // Task already completed, resume immediately
             if (scheduler) {
                 scheduler->schedule([continuation]() mutable {
                     if (continuation) {
-                        std::cout << "[DEBUG] AsyncTask::await_suspend - Resuming continuation via scheduler" << std::endl;
                         continuation.resume();
                     }
                 });
@@ -151,23 +140,15 @@ public:
                 // Use schedule_coroutine_task to avoid direct resume in await_suspend
                 modern_coro::schedule_coroutine_task([continuation]() mutable {
                     if (continuation) {
-                        std::cout << "[DEBUG] AsyncTask::await_suspend - Resuming continuation via schedule_coroutine_task" << std::endl;
                         continuation.resume();
                     }
                 });
             }
-        } else {
-            std::cout << "[DEBUG] AsyncTask::await_suspend - Continuation registered successfully" << std::endl;
         }
     }
 
     auto await_resume() {
-        std::cout << "[DEBUG] AsyncTask::await_resume - state: " << state_.get() << std::endl;
-        std::cout.flush();
-        
         if (!state_) {
-            std::cout << "[DEBUG] AsyncTask::await_resume - ERROR: state is null" << std::endl;
-            std::cout.flush();
             if constexpr (std::is_void_v<T>) {
                 return;
             } else {
@@ -187,8 +168,6 @@ public:
             is_completed = state_copy->completed.load(std::memory_order_acquire);
             
             if (!is_completed) {
-                std::cout << "[DEBUG] AsyncTask::await_resume - WARNING: Task not completed!" << std::endl;
-                std::cout.flush();
                 // 对于 void 任务，不要抛出异常，让协程自然完成
                 if constexpr (!std::is_void_v<T>) {
                     throw std::runtime_error("AsyncTask not completed in await_resume");
@@ -207,27 +186,14 @@ public:
         }
 
         if (exception) {
-            std::cout << "[DEBUG] AsyncTask::await_resume - Rethrowing exception" << std::endl;
-            std::cout.flush();
             std::rethrow_exception(exception);
         }
 
         if constexpr (!std::is_void_v<T>) {
             if (!has_value) {
-                std::cout << "[DEBUG] AsyncTask::await_resume - ERROR: Result not set" << std::endl;
-                std::cout.flush();
                 throw std::runtime_error("AsyncTask result not set");
             }
-            std::cout << "[DEBUG] AsyncTask::await_resume - Returning value: " << result_value << std::endl;
-            std::cout << "[DEBUG] AsyncTask::await_resume END - About to return, state: " << state_.get() << ", use_count: " << (state_ ? state_.use_count() : 0) << std::endl;
-            
-            // 在返回前强制刷新输出
-            std::cout.flush();
             return result_value;
-        } else {
-            std::cout << "[DEBUG] AsyncTask::await_resume - Void task completed" << std::endl;
-            std::cout << "[DEBUG] AsyncTask::await_resume END - About to return void, state: " << state_.get() << ", use_count: " << (state_ ? state_.use_count() : 0) << std::endl;
-            std::cout.flush();
         }
     }
 
@@ -241,41 +207,27 @@ private:
         std::atomic<bool> completed{false};
         
         ~SharedState() {
-            std::cout << "[DEBUG] SharedState destructor - this: " << this << ", completed: " << completed.load() << std::endl;
-            if (continuation) {
-                std::cout << "[DEBUG] SharedState destructor - continuation still exists: " << continuation.address() << std::endl;
-            }
+            // SharedState destructor
         }
     };
 
     explicit AsyncTask(std::shared_ptr<SharedState> state) : state_(std::move(state)) {
-        std::cout << "[DEBUG] AsyncTask constructor - state: " << state_.get() << std::endl;
+        // AsyncTask constructor
     }
     
 public:
     ~AsyncTask() {
-        std::cout << "[DEBUG] AsyncTask destructor START - state: " << state_.get() << ", use_count: " << (state_ ? state_.use_count() : 0) << std::endl;
-        if (state_) {
-            std::cout << "[DEBUG] AsyncTask destructor - completed: " << state_->completed.load() << std::endl;
-            std::cout << "[DEBUG] AsyncTask destructor - continuation: " << state_->continuation.address() << std::endl;
-        }
-        std::cout << "[DEBUG] AsyncTask destructor END - state: " << state_.get() << std::endl;
+        // AsyncTask destructor
     }
 
 private:
 
     static void set_value(const std::shared_ptr<SharedState>& state, ValueType&& value, modern_coro::Scheduler* scheduler = nullptr) {
-        std::cout << "[DEBUG] AsyncTask::set_value - state: " << state.get() << ", scheduler: " << scheduler << std::endl;
         std::coroutine_handle<> continuation;
         modern_coro::Scheduler* target_scheduler = nullptr;
         {
             std::lock_guard<std::mutex> lock(state->mutex);
             state->value = std::move(value);
-            if constexpr (!std::is_void_v<T>) {
-                std::cout << "[DEBUG] AsyncTask::set_value - Value set: " << *state->value << std::endl;
-            } else {
-                std::cout << "[DEBUG] AsyncTask::set_value - Void value set" << std::endl;
-            }
             state->completed.store(true, std::memory_order_release);
             continuation = state->continuation;
             target_scheduler = state->scheduler ? state->scheduler : scheduler;
@@ -285,21 +237,13 @@ private:
         // If no scheduler is available, use schedule_coroutine_task for proper async handling
         if (!target_scheduler) {
             if (continuation) {
-                std::cout << "[DEBUG] AsyncTask::set_value - Dispatching continuation via schedule_coroutine_task: " << continuation.address() << std::endl;
                 modern_coro::schedule_coroutine_task([continuation]() mutable {
                     if (continuation) {
                         continuation.resume();
                     }
                 });
-            } else {
-                std::cout << "[DEBUG] AsyncTask::set_value - No continuation to dispatch" << std::endl;
             }
             return;
-        }
-        if (continuation) {
-            std::cout << "[DEBUG] AsyncTask::set_value - Dispatching continuation: " << continuation.address() << std::endl;
-        } else {
-            std::cout << "[DEBUG] AsyncTask::set_value - No continuation to dispatch" << std::endl;
         }
         dispatch(state, continuation, target_scheduler);
     }
@@ -333,7 +277,6 @@ private:
     static void dispatch(const std::shared_ptr<SharedState>&,
                          std::coroutine_handle<> continuation,
                          modern_coro::Scheduler* scheduler) {
-        std::cout << "[DEBUG] AsyncTask::dispatch - continuation: " << continuation.address() << ", scheduler: " << scheduler << std::endl;
         if (!continuation) {
             return;
         }
@@ -341,7 +284,6 @@ private:
         if (scheduler) {
             scheduler->schedule([continuation]() mutable {
                 if (continuation) {
-                    std::cout << "[DEBUG] AsyncTask::dispatch - Resuming via scheduler" << std::endl;
                     continuation.resume();
                 }
             });
@@ -349,7 +291,6 @@ private:
             // Use schedule_coroutine_task to avoid direct resume
             modern_coro::schedule_coroutine_task([continuation]() mutable {
                 if (continuation) {
-                    std::cout << "[DEBUG] AsyncTask::dispatch - Resuming via schedule_coroutine_task" << std::endl;
                     continuation.resume();
                 }
             });
