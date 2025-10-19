@@ -49,6 +49,15 @@ template<typename T = void>
 class Task {
 public:
     struct promise_type {
+        // 成员变量声明移到前面
+        std::coroutine_handle<> continuation_ = nullptr;
+        T result;
+        std::exception_ptr exception;
+        std::atomic<bool> counted_{false};
+        Scheduler* scheduler_ptr_;  // 保存创建时的调度器指针
+        // 保持协程自持有，避免外部Task销毁导致的过早释放
+        std::shared_ptr<void> keep_alive_{};
+        
         promise_type() : scheduler_ptr_(get_current_scheduler_ptr()) {}
         
         ~promise_type() {
@@ -104,37 +113,46 @@ public:
         final_awaiter final_suspend() noexcept { 
             auto handle = std::coroutine_handle<promise_type>::from_promise(*this);
             std::cout << "[DEBUG] promise_type::final_suspend - handle: " << handle.address() << std::endl;
+            std::cout.flush();
             
-            // 从 CoroutineLifecycleManager 注销
-            unregister_coroutine_with_lifecycle_manager(handle);
+            try {
+                // 从 CoroutineLifecycleManager 注销
+                std::cout << "[DEBUG] promise_type::final_suspend - Unregistering from CoroutineLifecycleManager" << std::endl;
+                std::cout.flush();
+                unregister_coroutine_with_lifecycle_manager(handle);
 
-            // 从 AdvancedCoroutineLifecycleManager 注销
-            cancellation::AdvancedCoroutineLifecycleManager::unregister_coroutine(handle);
+                // 从 AdvancedCoroutineLifecycleManager 注销
+                std::cout << "[DEBUG] promise_type::final_suspend - Unregistering from AdvancedCoroutineLifecycleManager" << std::endl;
+                std::cout.flush();
+                cancellation::AdvancedCoroutineLifecycleManager::unregister_coroutine(handle);
 
-            // 在final_suspend中减少计数器，确保只减少一次
-            bool was_counted = counted_.exchange(false, std::memory_order_acq_rel);
-            std::cout << "[DEBUG] promise_type::final_suspend - was_counted: " << was_counted << std::endl;
-            if (was_counted) {
-                try {
-                    // 使用保存的调度器指针来减少计数器，避免thread_local问题
-                    if (scheduler_ptr_) {
-                        std::cout << "[DEBUG] promise_type::final_suspend - Decrementing on scheduler: " << scheduler_ptr_ << std::endl;
-                        decrement_active_coroutines_on_scheduler(scheduler_ptr_);
-                    } else {
-                        std::cout << "[DEBUG] promise_type::final_suspend - Decrementing on current scheduler" << std::endl;
-                        decrement_active_coroutines_on_current_scheduler();
+                // 在final_suspend中减少计数器，确保只减少一次
+                bool was_counted = counted_.exchange(false, std::memory_order_acq_rel);
+                std::cout << "[DEBUG] promise_type::final_suspend - was_counted: " << was_counted << std::endl;
+                std::cout.flush();
+                if (was_counted) {
+                    try {
+                        // 使用保存的调度器指针来减少计数器，避免thread_local问题
+                        if (scheduler_ptr_) {
+                            std::cout << "[DEBUG] promise_type::final_suspend - Decrementing on scheduler: " << scheduler_ptr_ << std::endl;
+                            decrement_active_coroutines_on_scheduler(scheduler_ptr_);
+                        } else {
+                            std::cout << "[DEBUG] promise_type::final_suspend - Decrementing on current scheduler" << std::endl;
+                            decrement_active_coroutines_on_current_scheduler();
+                        }
+                    } catch (...) {
+                        std::cout << "[DEBUG] promise_type::final_suspend - Exception during counter decrement" << std::endl;
+                        // 即使减少计数器失败，也要确保协程能够正常完成
                     }
-                } catch (...) {
-                    std::cout << "[DEBUG] promise_type::final_suspend - Exception during counter decrement" << std::endl;
-                    // 即使减少计数器失败，也要确保协程能够正常完成
                 }
+                // 打破自持有循环
+                keep_alive_.reset();
+                std::cout << "[DEBUG] promise_type::final_suspend - Completed" << std::endl;
+            } catch (...) {
+                std::cout << "[DEBUG] promise_type::final_suspend - Exception in final_suspend" << std::endl;
             }
-            // 打破自持有循环
-            keep_alive_.reset();
-            std::cout << "[DEBUG] promise_type::final_suspend - Completed" << std::endl;
             return {}; 
         }
-        std::coroutine_handle<> continuation_ = nullptr;
         
         template<typename U = T>
         void return_value(U&& value) {
@@ -144,13 +162,6 @@ public:
         void unhandled_exception() {
             exception = std::current_exception();
         }
-        
-        T result;
-        std::exception_ptr exception;
-        std::atomic<bool> counted_{false};
-        Scheduler* scheduler_ptr_;  // 保存创建时的调度器指针
-        // 保持协程自持有，避免外部Task销毁导致的过早释放
-        std::shared_ptr<void> keep_alive_{};
     };
     
     using handle_type = std::coroutine_handle<promise_type>;
@@ -488,7 +499,11 @@ public:
     }
     
     void await_resume() {
-        get();
+        // 对于 void 任务，await_resume 不应该抛出异常
+        // 让协程自然完成即可
+        if (state_ && state_->handle && state_->handle.promise().exception) {
+            std::rethrow_exception(state_->handle.promise().exception);
+        }
     }
     
     handle_type handle() const { return state_ ? state_->handle : handle_type{}; }

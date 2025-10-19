@@ -163,8 +163,11 @@ public:
 
     auto await_resume() {
         std::cout << "[DEBUG] AsyncTask::await_resume - state: " << state_.get() << std::endl;
+        std::cout.flush();
+        
         if (!state_) {
-            std::cout << "[DEBUG] AsyncTask::await_resume - state is null" << std::endl;
+            std::cout << "[DEBUG] AsyncTask::await_resume - ERROR: state is null" << std::endl;
+            std::cout.flush();
             if constexpr (std::is_void_v<T>) {
                 return;
             } else {
@@ -172,31 +175,59 @@ public:
             }
         }
         
+        // 增加引用计数，确保在 await_resume 执行期间 SharedState 不会被销毁
+        auto state_copy = state_;
         std::exception_ptr exception;
-        std::optional<ValueType> value;
+        ValueType result_value{};
+        bool has_value = false;
+        bool is_completed = false;
+        
         {
-            std::lock_guard<std::mutex> lock(state_->mutex);
-            exception = state_->exception;
+            std::lock_guard<std::mutex> lock(state_copy->mutex);
+            is_completed = state_copy->completed.load(std::memory_order_acquire);
+            
+            if (!is_completed) {
+                std::cout << "[DEBUG] AsyncTask::await_resume - WARNING: Task not completed!" << std::endl;
+                std::cout.flush();
+                // 对于 void 任务，不要抛出异常，让协程自然完成
+                if constexpr (!std::is_void_v<T>) {
+                    throw std::runtime_error("AsyncTask not completed in await_resume");
+                }
+            }
+            
+            exception = state_copy->exception;
             if constexpr (!std::is_void_v<T>) {
-                value = std::move(state_->value);
-                // 不要 reset state_->value，因为 state_ 可能在 await_resume 之后立即被销毁
+                if (state_copy->value.has_value()) {
+                    result_value = std::move(state_copy->value.value());
+                    has_value = true;
+                }
+            } else {
+                has_value = true; // void类型总是认为有值
             }
         }
 
         if (exception) {
             std::cout << "[DEBUG] AsyncTask::await_resume - Rethrowing exception" << std::endl;
+            std::cout.flush();
             std::rethrow_exception(exception);
         }
 
         if constexpr (!std::is_void_v<T>) {
-            if (!value.has_value()) {
-                std::cout << "[DEBUG] AsyncTask::await_resume - Result not set" << std::endl;
+            if (!has_value) {
+                std::cout << "[DEBUG] AsyncTask::await_resume - ERROR: Result not set" << std::endl;
+                std::cout.flush();
                 throw std::runtime_error("AsyncTask result not set");
             }
-            std::cout << "[DEBUG] AsyncTask::await_resume - Returning value: " << *value << std::endl;
-            return *value;
+            std::cout << "[DEBUG] AsyncTask::await_resume - Returning value: " << result_value << std::endl;
+            std::cout << "[DEBUG] AsyncTask::await_resume END - About to return, state: " << state_.get() << ", use_count: " << (state_ ? state_.use_count() : 0) << std::endl;
+            
+            // 在返回前强制刷新输出
+            std::cout.flush();
+            return result_value;
         } else {
             std::cout << "[DEBUG] AsyncTask::await_resume - Void task completed" << std::endl;
+            std::cout << "[DEBUG] AsyncTask::await_resume END - About to return void, state: " << state_.get() << ", use_count: " << (state_ ? state_.use_count() : 0) << std::endl;
+            std::cout.flush();
         }
     }
 
@@ -208,13 +239,30 @@ private:
         std::coroutine_handle<> continuation{};
         modern_coro::Scheduler* scheduler{nullptr};
         std::atomic<bool> completed{false};
+        
+        ~SharedState() {
+            std::cout << "[DEBUG] SharedState destructor - this: " << this << ", completed: " << completed.load() << std::endl;
+            if (continuation) {
+                std::cout << "[DEBUG] SharedState destructor - continuation still exists: " << continuation.address() << std::endl;
+            }
+        }
     };
 
     explicit AsyncTask(std::shared_ptr<SharedState> state) : state_(std::move(state)) {
         std::cout << "[DEBUG] AsyncTask constructor - state: " << state_.get() << std::endl;
     }
+    
+public:
+    ~AsyncTask() {
+        std::cout << "[DEBUG] AsyncTask destructor START - state: " << state_.get() << ", use_count: " << (state_ ? state_.use_count() : 0) << std::endl;
+        if (state_) {
+            std::cout << "[DEBUG] AsyncTask destructor - completed: " << state_->completed.load() << std::endl;
+            std::cout << "[DEBUG] AsyncTask destructor - continuation: " << state_->continuation.address() << std::endl;
+        }
+        std::cout << "[DEBUG] AsyncTask destructor END - state: " << state_.get() << std::endl;
+    }
 
-    ~AsyncTask() = default;
+private:
 
     static void set_value(const std::shared_ptr<SharedState>& state, ValueType&& value, modern_coro::Scheduler* scheduler = nullptr) {
         std::cout << "[DEBUG] AsyncTask::set_value - state: " << state.get() << ", scheduler: " << scheduler << std::endl;
