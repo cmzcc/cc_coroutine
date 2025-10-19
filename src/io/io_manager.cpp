@@ -1,5 +1,5 @@
-#include "io_manager.h"
-#include "coroutine_safety.h"  // 添加安全模块
+#include "../../include/io/io_manager.h"
+#include "../../include/safety/coroutine_safety.h"  // 添加安全模块
 #include <sys/socket.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -315,13 +315,21 @@ void IOManager::io_worker() {
             if ((revents & EPOLLIN) && ctx.read_handle) {
                 auto handle = ctx.read_handle;
                 ctx.read_handle = nullptr;
-                schedule([handle]() { handle.resume(); });
+                // 确保协程在IOManager的上下文中恢复
+                schedule([this, handle]() { 
+                    register_thread();
+                    handle.resume(); 
+                });
             }
             
             if ((revents & EPOLLOUT) && ctx.write_handle) {
                 auto handle = ctx.write_handle;
                 ctx.write_handle = nullptr;
-                schedule([handle]() { handle.resume(); });
+                // 确保协程在IOManager的上下文中恢复
+                schedule([this, handle]() { 
+                    register_thread();
+                    handle.resume(); 
+                });
             }
         }
     }

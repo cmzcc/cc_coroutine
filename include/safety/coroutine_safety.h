@@ -1,5 +1,6 @@
 #pragma once
-#include "coroutine.h"
+#include "core/coroutine.h"
+#include "safety/coroutine_safety.h"
 #include <exception>
 #include <functional>
 #include <memory>

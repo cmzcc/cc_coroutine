@@ -1,6 +1,6 @@
 #pragma once
 
-#include "coroutine.h"
+#include "core/coroutine.h"
 #include <chrono>
 #include <queue>
 #include <mutex>
@@ -30,8 +30,8 @@ public:
     Task<> sleep_for(Duration duration);
     
     // 添加定时任务
-    void add_timer(TimePoint time_point, std::function<void()> callback, void* scheduler_ptr);
-    void add_timer(TimePoint time_point, std::coroutine_handle<> handle, void* scheduler_ptr);
+    void add_timer(TimePoint time_point, std::function<void()> callback, Scheduler* scheduler_ptr);
+    void add_timer(TimePoint time_point, std::coroutine_handle<> handle, Scheduler* scheduler_ptr);
     
 private:
     struct TimerEvent {
@@ -39,7 +39,7 @@ private:
         std::coroutine_handle<> handle;
         std::function<void()> callback;
         
-        void* scheduler_ptr_; // 保存调度器指针
+        Scheduler* scheduler_ptr_; // 保存调度器指针
 
         bool operator>(const TimerEvent& other) const {
             return time_point > other.time_point;
@@ -63,7 +63,7 @@ class Timer;
 
 class TimerAwaiter {
 public:
-    explicit TimerAwaiter(Timer& timer, Timer::TimePoint time_point, void* scheduler_ptr);
+    explicit TimerAwaiter(Timer& timer, Timer::TimePoint time_point, Scheduler* scheduler_ptr);
 
     bool await_ready() const noexcept;
 
@@ -74,7 +74,7 @@ public:
 private:
     Timer& timer_;
     Timer::TimePoint time_point_;
-    void* scheduler_ptr_;
+    Scheduler* scheduler_ptr_;
 };
 
 } // namespace modern_coro

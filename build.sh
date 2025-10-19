@@ -25,7 +25,21 @@ cd build
 
 # 配置项目 - 现在 CMakeLists.txt 在根目录
 echo -e "${YELLOW}配置 CMake 项目...${NC}"
-if cmake .. -DCMAKE_BUILD_TYPE=Release; then
+
+# 自动检测 vcpkg toolchain
+TOOLCHAIN_ARG=""
+if [ -z "${CMAKE_TOOLCHAIN_FILE}" ]; then
+    # 优先使用环境变量 VCPKG_ROOT，其次尝试 ~/vcpkg
+    if [ -n "${VCPKG_ROOT}" ] && [ -f "${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" ]; then
+        TOOLCHAIN_ARG="-DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+        echo -e "${GREEN}检测到 VCPKG_ROOT：${VCPKG_ROOT}，已自动使用 vcpkg toolchain${NC}"
+    elif [ -f "$HOME/vcpkg/scripts/buildsystems/vcpkg.cmake" ]; then
+        TOOLCHAIN_ARG="-DCMAKE_TOOLCHAIN_FILE=$HOME/vcpkg/scripts/buildsystems/vcpkg.cmake"
+        echo -e "${GREEN}检测到 $HOME/vcpkg，已自动使用 vcpkg toolchain${NC}"
+    fi
+fi
+
+if cmake .. -DCMAKE_BUILD_TYPE=Release ${TOOLCHAIN_ARG}; then
     echo -e "${GREEN}✓ CMake 配置成功${NC}"
 else
     echo -e "${RED}✗ CMake 配置失败${NC}"
@@ -43,11 +57,6 @@ fi
 
 # 检查生成的文件
 echo -e "\n${BLUE}=== 构建结果 ===${NC}"
-if [ -f "modern_coro_example" ]; then
-    echo -e "  ${GREEN}✓${NC} 可执行文件: $(pwd)/modern_coro_example"
-else
-    echo -e "  ${RED}✗${NC} 可执行文件未找到"
-fi
 
 # 查找共享库文件
 SHARED_LIB=$(find . -name "libmodern_coro.so*" -type f | head -1)
@@ -76,8 +85,17 @@ if [ -n "$SHARED_LIB" ]; then
 fi
 
 
+# 运行测试（如果开启）
+if grep -q "add_subdirectory(tests)" ../CMakeLists.txt; then
+    echo -e "\n${YELLOW}运行测试...${NC}"
+    if ctest --output-on-failure; then
+        echo -e "${GREEN}✓ 所有测试通过${NC}"
+    else
+        echo -e "${RED}✗ 测试失败${NC}"
+        exit 1
+    fi
+fi
+
 echo -e "\n${GREEN}🎉 构建脚本执行完成！${NC}"
 echo -e "${BLUE}提示：${NC}"
-echo -e "  - 可执行文件位于: build/modern_coro_example"
 echo -e "  - 共享库位于: build/libmodern_coro.so*"
-echo -e "  - 运行示例: cd build && ./modern_coro_example"

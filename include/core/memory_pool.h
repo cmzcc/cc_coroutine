@@ -21,7 +21,13 @@ public:
     
     void* allocate(size_t size) {
         if (size > BlockSize) {
-            return std::aligned_alloc(alignof(std::max_align_t), size);
+            void* p = nullptr;
+            size_t align = alignof(std::max_align_t);
+            // posix_memalign: size can be any value; align must be power of two and multiple of sizeof(void*)
+            if (posix_memalign(&p, align, size) != 0) {
+                return nullptr;
+            }
+            return p;
         }
         
         std::lock_guard<std::mutex> lock(mutex_);
@@ -87,11 +93,11 @@ private:
     
     bool allocate_chunk() {
         const size_t chunk_size = BlockSize * blocks_per_chunk_;
-        void* chunk = std::aligned_alloc(alignof(std::max_align_t), chunk_size);
-        
-        if (!chunk) {
+        void* chunk = nullptr;
+        if (posix_memalign(&chunk, alignof(std::max_align_t), chunk_size) != 0) {
             return false;
         }
+        
         
         chunks_.push_back(chunk);
         
@@ -144,7 +150,10 @@ public:
         }
         
         // 分配新栈
-        void* ptr = std::aligned_alloc(alignof(std::max_align_t), size);
+        void* ptr = nullptr;
+        if (posix_memalign(&ptr, alignof(std::max_align_t), size) != 0) {
+            ptr = nullptr;
+        }
         if (ptr) {
             allocated_stacks_.fetch_add(1, std::memory_order_relaxed);
             total_allocated_memory_.fetch_add(size, std::memory_order_relaxed);

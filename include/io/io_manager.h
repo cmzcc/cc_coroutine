@@ -1,6 +1,6 @@
 #pragma once
 
-#include "scheduler.h"
+#include "scheduler/scheduler.h"
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -54,6 +54,9 @@ private:
     std::mutex fd_mutex_;
     std::thread io_thread_;
     std::atomic<bool> io_stop_flag_{false};
+
+    // 资源限制
+    size_t max_fds_ = 65536; // 可配置
 };
 
 // IO操作的awaiter - 修复 auto 参数问题

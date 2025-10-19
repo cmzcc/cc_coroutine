@@ -66,7 +66,7 @@ public:
 };
 
 // 取消源 - 负责管理取消状态和回调
-class CancellationSource {
+class CancellationSource : public std::enable_shared_from_this<CancellationSource> {
 private:
     mutable std::mutex mutex_;
     std::atomic<CancellationState> state_{CancellationState::NOT_CANCELLED};
@@ -77,11 +77,12 @@ public:
     CancellationSource() = default;
     ~CancellationSource() = default;
     
-    // 禁止拷贝和移动
+    // 禁止拷贝
     CancellationSource(const CancellationSource&) = delete;
     CancellationSource& operator=(const CancellationSource&) = delete;
-    CancellationSource(CancellationSource&&) = delete;
-    CancellationSource& operator=(CancellationSource&&) = delete;
+    // 允许移动
+    CancellationSource(CancellationSource&&) = default;
+    CancellationSource& operator=(CancellationSource&&) = default;
     
     // 请求取消
     void cancel() {
@@ -99,6 +100,7 @@ public:
             for (const auto& [id, callback] : callbacks_) {
                 callbacks_to_call.push_back(callback);
             }
+            callbacks_.clear(); // 清空回调
         }
         
         // 在锁外执行回调，避免死锁
@@ -115,7 +117,7 @@ public:
     
     // 检查是否已取消
     bool is_cancelled() const noexcept {
-        return state_.load() != CancellationState::NOT_CANCELLED;
+        return state_.load(std::memory_order_relaxed) != CancellationState::NOT_CANCELLED;
     }
     
     // 获取取消令牌
@@ -138,7 +140,7 @@ public:
         uint64_t id = next_callback_id_.fetch_add(1);
         callbacks_[id] = std::move(callback);
         
-        return CancellationRegistration(std::weak_ptr<CancellationSource>(shared_from_this()), id);
+        return CancellationRegistration(shared_from_this(), id);
     }
     
     // 注销回调
@@ -149,29 +151,7 @@ public:
     
     // 创建共享指针
     static std::shared_ptr<CancellationSource> create() {
-        return std::shared_ptr<CancellationSource>(new CancellationSource());
-    }
-    
-private:
-    // 使用 enable_shared_from_this 模式
-    std::shared_ptr<CancellationSource> shared_from_this() {
-        // 这里需要一个更复杂的实现来支持 shared_from_this
-        // 为简化，我们使用一个静态映射
-        static std::mutex sources_mutex;
-        static std::unordered_map<CancellationSource*, std::weak_ptr<CancellationSource>> sources;
-        
-        std::lock_guard<std::mutex> lock(sources_mutex);
-        auto it = sources.find(this);
-        if (it != sources.end()) {
-            if (auto shared = it->second.lock()) {
-                return shared;
-            }
-        }
-        
-        // 如果找不到，创建一个新的（这种情况不应该发生）
-        auto shared = std::shared_ptr<CancellationSource>(this, [](CancellationSource*){});
-        sources[this] = shared;
-        return shared;
+        return std::make_shared<CancellationSource>();
     }
 };
 

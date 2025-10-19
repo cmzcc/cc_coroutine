@@ -10,32 +10,35 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -O2")
 
 # 源文件
 set(SOURCES
-    src/scheduler.cpp
-    src/timer.cpp
-    src/io_manager.cpp
-    src/fd_manager.cpp
-    src/hook.cpp
-    src/advanced_scheduler.cpp
-    src/work_stealing_scheduler.cpp
-    src/coroutine_safety.cpp
-    src/coroutine_cancellation.cpp  # 添加新的取消机制
+    src/scheduler/scheduler.cpp
+    src/utils/timer.cpp
+    src/io/io_manager.cpp
+    src/io/fd_manager.cpp
+    src/io/hook.cpp
+    src/scheduler/advanced_scheduler.cpp
+    src/scheduler/work_stealing_scheduler.cpp
+    src/safety/coroutine_safety.cpp
+    src/safety/coroutine_cancellation.cpp  # 添加新的取消机制
 )
 
 # 头文件
 set(HEADERS
-    src/coroutine.h
-    src/scheduler.h
-    src/timer.h
-    src/io_manager.h
-    src/fd_manager.h
-    src/hook.h
-    src/advanced_scheduler.h
-    src/work_stealing_scheduler.h
-    src/coroutine_safety.h
-    src/coroutine_cancellation.h  # 添加新的取消机制头文件
+    include/core/coroutine.h
+    include/scheduler/scheduler.h
+    include/utils/timer.h
+    include/io/io_manager.h
+    include/io/fd_manager.h
+    include/io/hook.h
+    include/scheduler/advanced_scheduler.h
+    include/scheduler/work_stealing_scheduler.h
+    include/safety/coroutine_safety.h
+    include/safety/coroutine_cancellation.h  # 添加新的取消机制头文件
+    include/core/async_task.h
+    include/core/memory_pool.h
 )
 
 # 创建库
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_library(modern_coro SHARED ${SOURCES})
 
 # 设置库的版本
@@ -46,16 +49,15 @@ set_target_properties(modern_coro PROPERTIES
 
 # 包含目录
 target_include_directories(modern_coro PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
 
 # 链接库
-target_link_libraries(modern_coro PRIVATE pthread)
+target_link_libraries(modern_coro PRIVATE pthread dl)
 
-# 创建示例可执行文件
-add_executable(modern_coro_example src/example.cpp)
-target_link_libraries(modern_coro_example modern_coro pthread)
+
+# --- 测试框架配置（使用 vcpkg 的 GTest） ---
 
 # 安装规则
 install(TARGETS modern_coro
@@ -95,3 +97,10 @@ install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/modern_coroConfigVersion.cmake"
     DESTINATION lib/cmake/modern_coro
 )
+
+# 测试集成（可选，依赖 vcpkg 的 GTest）
+option(MODERN_CORO_BUILD_TESTS "Build modern_coro tests" ON)
+if(MODERN_CORO_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

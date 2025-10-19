@@ -1,8 +1,11 @@
-#include "scheduler.h"
+#include "../../include/scheduler/scheduler.h"
 #include <iostream>
 #include <thread>
 
 namespace modern_coro {
+
+#undef MODERN_CORO_DEBUG
+#define MODERN_CORO_DEBUG 0
 
 void increment_active_coroutines_on_current_scheduler() {
     if (auto s = Scheduler::GetCurrent()) {
@@ -17,10 +20,9 @@ void decrement_active_coroutines_on_current_scheduler() {
 }
 
 // 新增：直接在指定调度器上减少计数器的函数
-void decrement_active_coroutines_on_scheduler(void* scheduler_ptr) {
+void decrement_active_coroutines_on_scheduler(Scheduler* scheduler_ptr) {
     if (scheduler_ptr) {
-        auto scheduler = static_cast<Scheduler*>(scheduler_ptr);
-        scheduler->decrement_active_coroutines();
+        scheduler_ptr->decrement_active_coroutines();
     }
 }
 
@@ -77,7 +79,16 @@ void Scheduler::schedule(std::function<void()> func) {
             // 调度器已停止，不接受新任务
             return;
         }
+        if (tasks_.size() >= max_queue_size_) {
+            // 防止队列过大压垮内存，可改为丢弃或抛出异常，根据策略选择
+            // 这里选择丢弃并记录
+            std::cerr << "Task queue overflow, dropping task" << std::endl;
+            return;
+        }
         tasks_.emplace([this, func = std::move(func)]() {
+#if MODERN_CORO_DEBUG
+            std::cerr << "[DEBUG] executing scheduled task on thread " << std::this_thread::get_id() << std::endl;
+#endif
             try {
                 func();
                 total_completed_.fetch_add(1, std::memory_order_relaxed);
@@ -98,11 +109,26 @@ Scheduler* Scheduler::GetCurrent() {
 }
 
 Task<> Scheduler::sleep(std::chrono::milliseconds duration) {
-    return timer_->sleep_for(duration);
+#if MODERN_CORO_DEBUG
+    std::cerr << "[DEBUG] Scheduler::sleep enter, this=" << this
+              << " dur=" << duration.count() << "ms"
+              << " tid=" << std::this_thread::get_id() << std::endl;
+#endif
+    Scheduler* s = Scheduler::GetCurrent();
+    if (!s) s = this; // 兜底：若当前线程未注册，则退回到调用对象
+#if MODERN_CORO_DEBUG
+    std::cerr << "[DEBUG] Scheduler::sleep using scheduler=" << s
+              << " timer=" << (s ? s->timer_.get() : nullptr) << std::endl;
+#endif
+    return s->timer_->sleep_for(duration);
 }
 
 void Scheduler::worker_thread() {
     current_scheduler_ = this;
+#if MODERN_CORO_DEBUG
+    std::cerr << "[DEBUG] worker_thread started, scheduler=" << this
+              << " tid=" << std::this_thread::get_id() << std::endl;
+#endif
     
     while (true) {
         std::function<void()> task;
@@ -134,26 +160,22 @@ void schedule_coroutine_task(std::function<void()> task) {
     if (auto scheduler = Scheduler::GetCurrent()) {
         scheduler->schedule(std::move(task));
     } else {
-        std::thread(std::move(task)).detach();
+        // 避免创建裸的detached线程：退化为同步执行，或者可挂接到全局执行器
+        // 为保证语义简单且无资源泄漏，这里选择同步执行。
+        task();
     }
 }
 
 // 获取当前调度器指针（但不暴露Scheduler类型）
-void* get_current_scheduler_ptr() {
-    return Scheduler::GetCurrent();
-}
+Scheduler* get_current_scheduler_ptr() { return Scheduler::GetCurrent(); }
 
 // 调度器注册辅助函数
-void register_thread_on_scheduler(void* scheduler_ptr) {
-    if (scheduler_ptr) {
-        static_cast<Scheduler*>(scheduler_ptr)->register_thread();
-    }
+void register_thread_on_scheduler(Scheduler* scheduler_ptr) {
+    if (scheduler_ptr) { scheduler_ptr->register_thread(); }
 }
 
 // 调度器注销辅助函数
-void unregister_thread_on_scheduler(void* scheduler_ptr) {
-    if (scheduler_ptr) {
-        static_cast<Scheduler*>(scheduler_ptr)->unregister_thread();
-    }
+void unregister_thread_on_scheduler(Scheduler* scheduler_ptr) {
+    if (scheduler_ptr) { scheduler_ptr->unregister_thread(); }
 }
 } // namespace modern_coro

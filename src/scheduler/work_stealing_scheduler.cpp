@@ -1,4 +1,4 @@
-#include "work_stealing_scheduler.h"
+#include "../../include/scheduler/work_stealing_scheduler.h"
 #include <algorithm>
 #include <chrono>
 #include <iostream>

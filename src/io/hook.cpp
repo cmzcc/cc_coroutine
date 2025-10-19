@@ -1,8 +1,8 @@
-#include "hook.h"
-#include "scheduler.h"
-#include "io_manager.h"
-#include "timer.h"
-#include "fd_manager.h"
+#include "../../include/io/hook.h"
+#include "../../include/scheduler/scheduler.h"
+#include "../../include/io/io_manager.h"
+#include "../../include/utils/timer.h"
+#include "../../include/io/fd_manager.h"
 #include <iostream>
 #include <fcntl.h>
 #include <errno.h>

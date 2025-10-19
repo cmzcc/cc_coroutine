@@ -1,6 +1,6 @@
 #pragma once
 
-#include "scheduler.h"
+#include "scheduler/scheduler.h"
 #include <deque>
 #include <atomic>
 #include <random>

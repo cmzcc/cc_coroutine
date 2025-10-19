@@ -13,7 +13,8 @@
 #include <future>
 #include <exception>
 #include <utility>
-#include "coroutine_cancellation.h"  // 添加新的取消机制
+#include "safety/coroutine_cancellation.h"  // 添加新的取消机制
+#include "core/memory_pool.h"              // 引入对象池以优化分配
 
 namespace modern_coro {
 
@@ -29,15 +30,15 @@ namespace safety {
 void increment_active_coroutines_on_current_scheduler();
 void decrement_active_coroutines_on_current_scheduler();
 
-// 新增：直接在指定调度器上减少计数器的函数
-void decrement_active_coroutines_on_scheduler(void* scheduler_ptr);
+// 新增：直接在指定调度器上减少计数器的函数（类型安全）
+void decrement_active_coroutines_on_scheduler(Scheduler* scheduler_ptr);
 
 void schedule_coroutine_task(std::function<void()> task);
 
-void* get_current_scheduler_ptr();
+Scheduler* get_current_scheduler_ptr();
 
-void register_thread_on_scheduler(void* scheduler_ptr);
-void unregister_thread_on_scheduler(void* scheduler_ptr);
+void register_thread_on_scheduler(Scheduler* scheduler_ptr);
+void unregister_thread_on_scheduler(Scheduler* scheduler_ptr);
 
 // 新增：协程生命周期管理辅助函数
 void register_coroutine_with_lifecycle_manager(std::coroutine_handle<> handle);
@@ -90,7 +91,7 @@ public:
                 
                 if (h.promise().continuation_) {
                     auto continuation = h.promise().continuation_;
-                    void* scheduler_ptr = h.promise().scheduler_ptr_;
+                    Scheduler* scheduler_ptr = h.promise().scheduler_ptr_;
                     if (!scheduler_ptr) {
                         scheduler_ptr = get_current_scheduler_ptr();
                     }
@@ -117,7 +118,7 @@ public:
 
             // 在final_suspend中减少计数器，确保只减少一次
             // std::cout << "[DEBUG] Task<void> final_suspend called, counted_=" << counted_.load() << std::endl;
-            bool was_counted = counted_.exchange(false);
+            bool was_counted = counted_.exchange(false, std::memory_order_acq_rel);
             // std::cout << "[DEBUG] Task<void> final_suspend was_counted=" << was_counted << std::endl;
             if (was_counted) {
                 try {
@@ -131,9 +132,10 @@ public:
                     // 即使减少计数器失败，也要确保协程能够正常完成
                 }
             }
+            // 打破自持有循环
+            keep_alive_.reset();
             return {}; 
         }
-        
         std::coroutine_handle<> continuation_ = nullptr;
         
         template<typename U = T>
@@ -148,7 +150,9 @@ public:
         T result;
         std::exception_ptr exception;
         std::atomic<bool> counted_{false};
-        void* scheduler_ptr_;  // 保存创建时的调度器指针
+        Scheduler* scheduler_ptr_;  // 保存创建时的调度器指针
+        // 保持协程自持有，避免外部Task销毁导致的过早释放
+        std::shared_ptr<void> keep_alive_{};
     };
     
     using handle_type = std::coroutine_handle<promise_type>;
@@ -157,17 +161,24 @@ public:
         handle_type handle;
         std::atomic<int> ref_count{1};
         std::atomic<bool> destroyed{false};
-        
+
         SharedState(handle_type h) : handle(h) {}
-        
-        void add_ref() { 
-            ref_count.fetch_add(1, std::memory_order_relaxed); 
+
+        // 使用对象池优化分配/释放
+        static void* operator new(size_t sz) {
+            return MemoryPool<4096>::instance().allocate(sz);
         }
-        
+        static void operator delete(void* p, size_t sz) {
+            MemoryPool<4096>::instance().deallocate(p, sz);
+        }
+
+        void add_ref() { 
+            ref_count.fetch_add(1, std::memory_order_relaxed);
+        }
+
         void release() {
             int old_count = ref_count.fetch_sub(1, std::memory_order_acq_rel);
             if (old_count == 1) {
-                // 使用原子操作防止重复销毁
                 bool expected = false;
                 if (destroyed.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
                     if (handle) {
@@ -181,15 +192,13 @@ public:
                                     decrement_active_coroutines_on_current_scheduler();
                                 }
                             } catch (...) {
-                                // 忽略异常，防止析构函数抛出异常
+                                // 忽略异常
                             }
                         }
-                        
-                        // 安全销毁协程句柄
+
+                        // 最终释放：按约定此时协程应已完成；无条件销毁以避免悬空重启
                         try {
-                            if (!handle.done()) {
-                                handle.destroy();
-                            }
+                            handle.destroy();
                         } catch (...) {
                             // 忽略销毁异常
                         }
@@ -250,7 +259,7 @@ public:
         }
         if (state_ && state_->handle && !state_->handle.done()) {
             auto state = state_;  // 保持 SharedState 存活
-            void* scheduler_ptr = state->handle.promise().scheduler_ptr_;
+            Scheduler* scheduler_ptr = state->handle.promise().scheduler_ptr_;
             schedule_coroutine_task([state, scheduler_ptr]() {
                 register_thread_on_scheduler(scheduler_ptr);
                 if (state->handle && !state->handle.done()) {
@@ -267,6 +276,13 @@ public:
     }
     
     handle_type handle() const { return state_ ? state_->handle : handle_type{}; }
+    // Keep-alive helpers for scheduler
+    std::shared_ptr<void> share_state_opaque() const { return state_; }
+    void set_keep_alive(std::shared_ptr<void> keep) {
+        if (state_ && state_->handle) {
+            state_->handle.promise().keep_alive_ = std::move(keep);
+        }
+    }
     
 private:
     std::shared_ptr<SharedState> state_;
@@ -319,7 +335,7 @@ public:
                 
                 if (h.promise().continuation_) {
                     auto continuation = h.promise().continuation_;
-                    void* scheduler_ptr = h.promise().scheduler_ptr_;
+                    Scheduler* scheduler_ptr = h.promise().scheduler_ptr_;
                     if (!scheduler_ptr) {
                         scheduler_ptr = get_current_scheduler_ptr();
                     }
@@ -358,6 +374,8 @@ public:
                     // 即使减少计数器失败，也要确保协程能够正常完成
                 }
             }
+            // 打破自持有循环
+            keep_alive_.reset();
             return {}; 
         }
         
@@ -369,9 +387,11 @@ public:
             exception = std::current_exception();
         }
         
-        std::exception_ptr exception;
-        std::atomic<bool> counted_{false};
-        void* scheduler_ptr_;  // 保存创建时的调度器指针
+    std::exception_ptr exception;
+    std::atomic<bool> counted_{false};
+    Scheduler* scheduler_ptr_;  // 保存创建时的调度器指针
+    // 保持自持有
+    std::shared_ptr<void> keep_alive_{};
     };
     
     using handle_type = std::coroutine_handle<promise_type>;
@@ -379,30 +399,50 @@ public:
     struct SharedState {
         handle_type handle;
         std::atomic<int> ref_count{1};
-        
+        std::atomic<bool> destroyed{false};
+
         SharedState(handle_type h) : handle(h) {}
-        
-        void add_ref() { ref_count.fetch_add(1); }
+
+        // 使用对象池优化分配/释放
+        static void* operator new(size_t sz) {
+            return MemoryPool<4096>::instance().allocate(sz);
+        }
+        static void operator delete(void* p, size_t sz) {
+            MemoryPool<4096>::instance().deallocate(p, sz);
+        }
+
+        void add_ref() { ref_count.fetch_add(1, std::memory_order_relaxed); }
         void release() {
-            int old_count = ref_count.fetch_sub(1);
+            int old_count = ref_count.fetch_sub(1, std::memory_order_acq_rel);
             if (old_count == 1) {
-                if (handle) {
-                    // if the coroutine is not finished, we should decrement the counter
-                    bool was_counted = handle.promise().counted_.exchange(false);
-                    if (was_counted) {
+                bool expected = false;
+                if (destroyed.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+                    if (handle) {
+                        // 如果协程仍被计数，进行一次性减少
+                        bool was_counted = handle.promise().counted_.exchange(false, std::memory_order_acq_rel);
+                        if (was_counted) {
+                            try {
+                                if (handle.promise().scheduler_ptr_) {
+                                    decrement_active_coroutines_on_scheduler(handle.promise().scheduler_ptr_);
+                                } else {
+                                    decrement_active_coroutines_on_current_scheduler();
+                                }
+                            } catch (...) {
+                                // 忽略
+                            }
+                        }
+
+                        // 仅在未完成时销毁，保持与泛型版本一致
                         try {
-                            if (handle.promise().scheduler_ptr_) {
-                                decrement_active_coroutines_on_scheduler(handle.promise().scheduler_ptr_);
-                            } else {
-                                decrement_active_coroutines_on_current_scheduler();
+                            if (!handle.done()) {
+                                handle.destroy();
                             }
                         } catch (...) {
-                            // ignore
+                            // 忽略销毁异常
                         }
                     }
-                    handle.destroy();
+                    delete this;
                 }
-                delete this;
             }
         }
     };
@@ -448,10 +488,14 @@ public:
     void await_suspend(std::coroutine_handle<> continuation) {
         if (state_ && state_->handle) {
             state_->handle.promise().continuation_ = continuation;
+            // 与泛型版本保持一致：若未捕获到调度器，则在 await 时继承一次
+            if (!state_->handle.promise().scheduler_ptr_) {
+                state_->handle.promise().scheduler_ptr_ = get_current_scheduler_ptr();
+            }
         }
         if (state_ && state_->handle && !state_->handle.done()) {
             auto state = state_;  // 保持 SharedState 存活
-            void* scheduler_ptr = state->handle.promise().scheduler_ptr_;
+            Scheduler* scheduler_ptr = state->handle.promise().scheduler_ptr_;
             schedule_coroutine_task([state, scheduler_ptr]() {
                 register_thread_on_scheduler(scheduler_ptr);
                 if (state->handle && !state->handle.done()) {
@@ -468,6 +512,13 @@ public:
     }
     
     handle_type handle() const { return state_ ? state_->handle : handle_type{}; }
+    // Keep-alive helpers for scheduler
+    std::shared_ptr<void> share_state_opaque() const { return state_; }
+    void set_keep_alive(std::shared_ptr<void> keep) {
+        if (state_ && state_->handle) {
+            state_->handle.promise().keep_alive_ = std::move(keep);
+        }
+    }
     
 private:
     std::shared_ptr<SharedState> state_;

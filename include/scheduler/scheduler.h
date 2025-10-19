@@ -8,7 +8,7 @@
 #include <atomic>
 #include <functional>
 #include <iostream>
-#include "timer.h"
+#include "utils/timer.h"
 #include <memory>
 
 namespace modern_coro {
@@ -47,22 +47,20 @@ public:
     
     template<typename T>
     void schedule(Task<T>&& task, TaskCallback callback = nullptr) {
-        auto task_ptr = std::make_shared<Task<T>>(std::move(task));
+        // 建立自持有，获取句柄和共享状态供队列任务使用
+        auto keep = task.share_state_opaque();
+        task.set_keep_alive(keep);
+        auto handle = task.handle();
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            tasks_.emplace([this, task_ptr, callback = std::move(callback)]() mutable {
-                // 重要：确保在协程执行期间task_ptr始终保持存活
-                auto handle = task_ptr->handle();
-                if (handle) {
-                    // 只resume一次，让协程的await机制处理后续执行
-                    if (!handle.done()) {
-                        handle.resume();
-                    }
+            tasks_.emplace([handle, keep, callback = std::move(callback)]() mutable {
+                if (handle && !handle.done()) {
+                    handle.resume();
                 }
                 if (callback) {
                     callback();
                 }
-                // task_ptr在这里销毁，确保协程已经完成
+                // keep 在此作用域结束前保持，共享状态在协程 final_suspend 处自行解除
             });
         }
         cv_.notify_one();
@@ -72,26 +70,35 @@ public:
     
     static Scheduler* GetCurrent();
     
-    // 获取当前调度器指针（但不暴露Scheduler类型）
-    static void* get_current_scheduler_ptr();
-    
-    // 调度器注册/注销辅助函数（避免类型暴露）
-    static void register_thread_on_scheduler(void* scheduler_ptr);
-    static void unregister_thread_on_scheduler(void* scheduler_ptr);
+    // 调度器注册/注销辅助函数
+    static void register_thread_on_scheduler(Scheduler* scheduler_ptr);
+    static void unregister_thread_on_scheduler(Scheduler* scheduler_ptr);
     
     Task<> sleep(std::chrono::milliseconds duration);
 
+    // 通用重载：支持任意 chrono duration，内部统一转换为毫秒
+    // 注意：为避免亚毫秒被截断为0导致“立即返回”的竞态，做最小1ms向上取整
+    template <typename Rep, typename Period>
+    Task<> sleep(std::chrono::duration<Rep, Period> duration) {
+        using SrcDur = std::chrono::duration<Rep, Period>;
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(duration);
+        if (ms.count() == 0 && duration > SrcDur::zero()) {
+            ms = std::chrono::milliseconds(1);
+        }
+        return sleep(ms);
+    }
+
     void increment_active_coroutines() { 
-        active_coroutines_.fetch_add(1);
+        active_coroutines_.fetch_add(1, std::memory_order_relaxed);
     }
     void decrement_active_coroutines() { 
-        auto current = active_coroutines_.load();
+        auto current = active_coroutines_.load(std::memory_order_relaxed);
         if (current > 0) {
-            active_coroutines_.fetch_sub(1);
+            active_coroutines_.fetch_sub(1, std::memory_order_relaxed);
         }
     }
 
-    size_t get_active_coroutines() const { return active_coroutines_.load(); }
+    size_t get_active_coroutines() const { return active_coroutines_.load(std::memory_order_relaxed); }
     
     SchedulerStats get_stats() const {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -117,6 +124,7 @@ protected:
     
     std::vector<std::thread> workers_;
     std::queue<std::function<void()>> tasks_;
+    size_t max_queue_size_ = 500000; // 资源限制：最大任务积压
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::atomic<bool> stop_flag_{false};
