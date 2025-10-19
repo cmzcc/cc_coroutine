@@ -83,12 +83,6 @@ public:
             bool await_ready() noexcept { return false; }
             void await_resume() noexcept {}
             void await_suspend(std::coroutine_handle<promise_type> h) noexcept {
-                // 在协程完成时从 CoroutineLifecycleManager 注销
-                unregister_coroutine_with_lifecycle_manager(h);
-                
-                // 从 AdvancedCoroutineLifecycleManager 注销
-                cancellation::AdvancedCoroutineLifecycleManager::unregister_coroutine(h);
-                
                 if (h.promise().continuation_) {
                     auto continuation = h.promise().continuation_;
                     Scheduler* scheduler_ptr = h.promise().scheduler_ptr_;
@@ -109,6 +103,7 @@ public:
 
         final_awaiter final_suspend() noexcept { 
             auto handle = std::coroutine_handle<promise_type>::from_promise(*this);
+            std::cout << "[DEBUG] promise_type::final_suspend - handle: " << handle.address() << std::endl;
             
             // 从 CoroutineLifecycleManager 注销
             unregister_coroutine_with_lifecycle_manager(handle);
@@ -117,23 +112,26 @@ public:
             cancellation::AdvancedCoroutineLifecycleManager::unregister_coroutine(handle);
 
             // 在final_suspend中减少计数器，确保只减少一次
-            // std::cout << "[DEBUG] Task<void> final_suspend called, counted_=" << counted_.load() << std::endl;
             bool was_counted = counted_.exchange(false, std::memory_order_acq_rel);
-            // std::cout << "[DEBUG] Task<void> final_suspend was_counted=" << was_counted << std::endl;
+            std::cout << "[DEBUG] promise_type::final_suspend - was_counted: " << was_counted << std::endl;
             if (was_counted) {
                 try {
                     // 使用保存的调度器指针来减少计数器，避免thread_local问题
                     if (scheduler_ptr_) {
+                        std::cout << "[DEBUG] promise_type::final_suspend - Decrementing on scheduler: " << scheduler_ptr_ << std::endl;
                         decrement_active_coroutines_on_scheduler(scheduler_ptr_);
                     } else {
+                        std::cout << "[DEBUG] promise_type::final_suspend - Decrementing on current scheduler" << std::endl;
                         decrement_active_coroutines_on_current_scheduler();
                     }
                 } catch (...) {
+                    std::cout << "[DEBUG] promise_type::final_suspend - Exception during counter decrement" << std::endl;
                     // 即使减少计数器失败，也要确保协程能够正常完成
                 }
             }
             // 打破自持有循环
             keep_alive_.reset();
+            std::cout << "[DEBUG] promise_type::final_suspend - Completed" << std::endl;
             return {}; 
         }
         std::coroutine_handle<> continuation_ = nullptr;
@@ -178,31 +176,27 @@ public:
 
         void release() {
             int old_count = ref_count.fetch_sub(1, std::memory_order_acq_rel);
+            std::cout << "[DEBUG] SharedState::release - ref_count: " << old_count << " -> " << (old_count - 1) << std::endl;
             if (old_count == 1) {
                 bool expected = false;
                 if (destroyed.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+                    std::cout << "[DEBUG] SharedState::release - Destroying handle: " << (handle ? handle.address() : nullptr) << std::endl;
                     if (handle) {
-                        // 确保协程计数器正确管理
-                        bool was_counted = handle.promise().counted_.exchange(false, std::memory_order_acq_rel);
-                        if (was_counted) {
-                            try {
-                                if (handle.promise().scheduler_ptr_) {
-                                    decrement_active_coroutines_on_scheduler(handle.promise().scheduler_ptr_);
-                                } else {
-                                    decrement_active_coroutines_on_current_scheduler();
-                                }
-                            } catch (...) {
-                                // 忽略异常
-                            }
-                        }
-
-                        // 最终释放：按约定此时协程应已完成；无条件销毁以避免悬空重启
+                        // 不在这里减少计数器，因为final_suspend已经处理了
+                        // 只负责销毁协程句柄
                         try {
-                            handle.destroy();
+                            if (!handle.done()) {
+                                std::cout << "[DEBUG] SharedState::release - Handle not done, destroying" << std::endl;
+                                handle.destroy();
+                            } else {
+                                std::cout << "[DEBUG] SharedState::release - Handle already done" << std::endl;
+                            }
                         } catch (...) {
+                            std::cout << "[DEBUG] SharedState::release - Exception during handle destruction" << std::endl;
                             // 忽略销毁异常
                         }
                     }
+                    std::cout << "[DEBUG] SharedState::release - Deleting SharedState" << std::endl;
                     delete this;
                 }
             }
@@ -223,6 +217,7 @@ public:
     }
     
     ~Task() {
+        std::cout << "[DEBUG] Task destructor called, state: " << (state_ ? state_.get() : nullptr) << std::endl;
         // SharedState会自动管理生命周期
     }
     
@@ -262,12 +257,14 @@ public:
             Scheduler* scheduler_ptr = state->handle.promise().scheduler_ptr_;
             schedule_coroutine_task([state, scheduler_ptr]() {
                 register_thread_on_scheduler(scheduler_ptr);
-                if (state->handle && !state->handle.done()) {
+                if (state && state->handle && !state->handle.done()) {
                     state->handle.resume();
                 }
             });
         } else {
-            continuation.resume();
+            if (continuation) {
+                continuation.resume();
+            }
         }
     }
     
@@ -327,12 +324,6 @@ public:
             bool await_ready() noexcept { return false; }
             void await_resume() noexcept {}
             void await_suspend(std::coroutine_handle<promise_type> h) noexcept {
-                // 在协程完成时从 CoroutineLifecycleManager 注销
-                unregister_coroutine_with_lifecycle_manager(h);
-                
-                // 从 AdvancedCoroutineLifecycleManager 注销
-                cancellation::AdvancedCoroutineLifecycleManager::unregister_coroutine(h);
-                
                 if (h.promise().continuation_) {
                     auto continuation = h.promise().continuation_;
                     Scheduler* scheduler_ptr = h.promise().scheduler_ptr_;
@@ -418,21 +409,8 @@ public:
                 bool expected = false;
                 if (destroyed.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
                     if (handle) {
-                        // 如果协程仍被计数，进行一次性减少
-                        bool was_counted = handle.promise().counted_.exchange(false, std::memory_order_acq_rel);
-                        if (was_counted) {
-                            try {
-                                if (handle.promise().scheduler_ptr_) {
-                                    decrement_active_coroutines_on_scheduler(handle.promise().scheduler_ptr_);
-                                } else {
-                                    decrement_active_coroutines_on_current_scheduler();
-                                }
-                            } catch (...) {
-                                // 忽略
-                            }
-                        }
-
-                        // 仅在未完成时销毁，保持与泛型版本一致
+                        // 不在这里减少计数器，因为final_suspend已经处理了
+                        // 只负责销毁协程句柄
                         try {
                             if (!handle.done()) {
                                 handle.destroy();
@@ -498,12 +476,14 @@ public:
             Scheduler* scheduler_ptr = state->handle.promise().scheduler_ptr_;
             schedule_coroutine_task([state, scheduler_ptr]() {
                 register_thread_on_scheduler(scheduler_ptr);
-                if (state->handle && !state->handle.done()) {
+                if (state && state->handle && !state->handle.done()) {
                     state->handle.resume();
                 }
             });
         } else {
-            continuation.resume();
+            if (continuation) {
+                continuation.resume();
+            }
         }
     }
     

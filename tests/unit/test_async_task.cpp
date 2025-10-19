@@ -15,36 +15,69 @@ using namespace modern_coro;
 
 // 测试从同步函数创建异步任务
 TEST(AsyncTaskTest, FromSyncFunction) {
+    std::cout << "[TEST] Starting FromSyncFunction test" << std::endl;
+    
     Scheduler scheduler(2);
     scheduler.start();
+    std::cout << "[TEST] Scheduler started" << std::endl;
 
     std::atomic<bool> done{false};
     int result_value = 0;
 
     // 创建协程任务
     Task<> coro_task = [&]() -> Task<> {
+        std::cout << "[TEST] Coroutine started" << std::endl;
         // 测试有返回值的情况
         auto task = AsyncTask<int>::from_sync([]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             return 42;
         });
 
+        std::cout << "[TEST] About to co_await AsyncTask" << std::endl;
         // 在协程中等待异步任务
-        result_value = co_await task;
+        try {
+            result_value = co_await task;
+            std::cout << "[TEST] co_await completed successfully" << std::endl;
+            std::cout << "[TEST] AsyncTask completed with result: " << result_value << std::endl;
+        } catch (const std::exception& e) {
+            std::cout << "[TEST] Exception during co_await: " << e.what() << std::endl;
+            throw;
+        } catch (...) {
+            std::cout << "[TEST] Unknown exception during co_await" << std::endl;
+            throw;
+        }
+        
+        std::cout << "[TEST] Setting done flag" << std::endl;
+        std::cout << "[TEST] Coroutine got result: " << result_value << std::endl;
         done.store(true);
+        std::cout << "[TEST] Done flag set" << std::endl;
+        std::cout << "[TEST] Coroutine completed" << std::endl;
+        std::cout << "[TEST] About to co_return" << std::endl;
+        co_return;
     }();
 
+    std::cout << "[TEST] Scheduling coroutine" << std::endl;
     scheduler.schedule(std::move(coro_task));
 
     // 等待测试完成
+    std::cout << "[TEST] Waiting for completion" << std::endl;
     for (int i = 0; i < 200 && !done.load(); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
+    std::cout << "[TEST] Test completed, stopping scheduler" << std::endl;
+    
+    // 给协程一些时间完成清理
+    std::cout << "[TEST] About to sleep before shutdown" << std::endl;
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    
+    std::cout << "[TEST] Initiating scheduler shutdown" << std::endl;
     scheduler.stop();
+    std::cout << "[TEST] Scheduler stopped" << std::endl;
 
     EXPECT_TRUE(done.load());
     EXPECT_EQ(result_value, 42);
+    std::cout << "[TEST] Test finished successfully" << std::endl;
 }
 
 // 测试从同步函数创建异步void任务

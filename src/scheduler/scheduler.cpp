@@ -160,9 +160,10 @@ void schedule_coroutine_task(std::function<void()> task) {
     if (auto scheduler = Scheduler::GetCurrent()) {
         scheduler->schedule(std::move(task));
     } else {
-        // 避免创建裸的detached线程：退化为同步执行，或者可挂接到全局执行器
-        // 为保证语义简单且无资源泄漏，这里选择同步执行。
-        task();
+        // 当没有调度器时，创建一个新线程来执行任务，避免同步执行导致的竞态条件
+        std::thread([task = std::move(task)]() {
+            task();
+        }).detach();
     }
 }
 

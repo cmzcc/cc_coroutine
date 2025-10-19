@@ -152,4 +152,7 @@ public:
     void await_resume() const noexcept {}
 };
 
+// 辅助函数声明：在有调度器时投递任务，否则回退到新线程
+void schedule_coroutine_task(std::function<void()> task);
+
 } // namespace modern_coro
