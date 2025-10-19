@@ -49,19 +49,33 @@ void Scheduler::start() {
 
 void Scheduler::stop() {
     timer_->stop();
+
+    // 等待所有协程完成
+    auto start_time = std::chrono::steady_clock::now();
+    while (!is_idle()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - start_time);
+        if (elapsed.count() > 10) {  // 最多等待10秒
+            std::cerr << "Warning: Scheduler stop timed out waiting for "
+                      << get_active_coroutines() << " active coroutines" << std::endl;
+            break;
+        }
+    }
+
     {
         std::lock_guard<std::mutex> lock(mutex_);
         stop_flag_ = true;
     }
     cv_.notify_all();
-    
+
     for (auto& worker : workers_) {
         if (worker.joinable()) {
             worker.join();
         }
     }
     workers_.clear();
-    
+
     // 清理剩余任务以防止内存泄漏
     std::lock_guard<std::mutex> lock(mutex_);
     while (!tasks_.empty()) {

@@ -7,7 +7,37 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-echo -e "${BLUE}=== Modern Coro 项目构建脚本 ===${NC}"
+# 解析命令行参数
+MEMORY_LEAK_MODE=false
+BUILD_TYPE="Release"
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --memory-leak)
+            MEMORY_LEAK_MODE=true
+            BUILD_TYPE="Debug"
+            shift
+            ;;
+        --help)
+            echo "用法: $0 [选项]"
+            echo "选项:"
+            echo "  --memory-leak    启用内存泄漏检测模式 (使用 AddressSanitizer 和 LeakSanitizer)"
+            echo "  --help           显示此帮助信息"
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}未知选项: $1${NC}"
+            echo "使用 --help 查看可用选项"
+            exit 1
+            ;;
+    esac
+done
+
+if [ "$MEMORY_LEAK_MODE" = true ]; then
+    echo -e "${BLUE}=== Modern Coro 内存泄漏检测构建脚本 ===${NC}"
+else
+    echo -e "${BLUE}=== Modern Coro 项目构建脚本 ===${NC}"
+fi
 
 # 确保在正确的目录
 cd "$(dirname "$0")"
@@ -39,11 +69,25 @@ if [ -z "${CMAKE_TOOLCHAIN_FILE}" ]; then
     fi
 fi
 
-if cmake .. -DCMAKE_BUILD_TYPE=Release ${TOOLCHAIN_ARG}; then
-    echo -e "${GREEN}✓ CMake 配置成功${NC}"
+# 根据模式设置不同的编译选项
+if [ "$MEMORY_LEAK_MODE" = true ]; then
+    echo -e "${YELLOW}启用内存泄漏检测模式...${NC}"
+    if cmake .. -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
+                -DCMAKE_CXX_FLAGS="-fsanitize=address -fsanitize=leak -g -O1 -fno-omit-frame-pointer" \
+                -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address -fsanitize=leak" \
+                ${TOOLCHAIN_ARG}; then
+        echo -e "${GREEN}✓ CMake 配置成功${NC}"
+    else
+        echo -e "${RED}✗ CMake 配置失败${NC}"
+        exit 1
+    fi
 else
-    echo -e "${RED}✗ CMake 配置失败${NC}"
-    exit 1
+    if cmake .. -DCMAKE_BUILD_TYPE=${BUILD_TYPE} ${TOOLCHAIN_ARG}; then
+        echo -e "${GREEN}✓ CMake 配置成功${NC}"
+    else
+        echo -e "${RED}✗ CMake 配置失败${NC}"
+        exit 1
+    fi
 fi
 
 # 编译
@@ -93,9 +137,16 @@ if grep -q "add_subdirectory(tests)" ../CMakeLists.txt; then
     else
         echo -e "${RED}✗ 测试失败${NC}"
         exit 1
+    
     fi
 fi
 
 echo -e "\n${GREEN}🎉 构建脚本执行完成！${NC}"
 echo -e "${BLUE}提示：${NC}"
-echo -e "  - 共享库位于: build/libmodern_coro.so*"
+if [ "$MEMORY_LEAK_MODE" = true ]; then
+    echo -e "  - 内存检测日志保存在: build/asan.log, build/lsan.log"
+    echo -e "  - 使用 lsan.supp 文件抑制已知泄漏"
+else
+    echo -e "  - 共享库位于: build/libmodern_coro.so*"
+    echo -e "  - 如需内存泄漏检测，请使用: ./build.sh --memory-leak"
+fi

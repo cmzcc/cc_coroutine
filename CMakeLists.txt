@@ -32,7 +32,7 @@ set(HEADERS
     include/scheduler/advanced_scheduler.h
     include/scheduler/work_stealing_scheduler.h
     include/safety/coroutine_safety.h
-    include/safety/coroutine_cancellation.h  # 添加新的取消机制头文件
+    include/safety/coroutine_cancellation.h
     include/core/async_task.h
     include/core/memory_pool.h
 )
