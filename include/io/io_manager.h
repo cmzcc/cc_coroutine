@@ -48,6 +48,12 @@ namespace modern_coro
         // 异步连接 - 使用系统的 sockaddr
         Task<int> async_connect(int sockfd, const struct ::sockaddr *addr, socklen_t addrlen);
 
+        // 添加事件监听（测试用）
+        void add_event(int fd, Event event, std::coroutine_handle<> handle);
+
+        // 删除事件监听（测试用）
+        void del_event(int fd, Event event);
+
         // 检查是否在同步模式
         bool is_sync_mode() const { return sync_mode_.load(); }
 
@@ -62,6 +68,13 @@ namespace modern_coro
         IOStats get_io_stats() const;
 
     private:
+        struct FdContext
+        {
+            std::coroutine_handle<> read_handle;
+            std::coroutine_handle<> write_handle;
+            size_t io_thread_idx; // 记录该 fd 由哪个 IO 线程管理
+        };
+
         // IO 线程上下文
         struct IOThreadContext
         {
@@ -84,18 +97,8 @@ namespace modern_coro
             }
         };
 
-        struct FdContext
-        {
-            std::coroutine_handle<> read_handle;
-            std::coroutine_handle<> write_handle;
-            size_t io_thread_idx; // 记录该 fd 由哪个 IO 线程管理
-        };
-
         // 添加事件监听（内部使用）
-        void add_event(int fd, Event event, std::coroutine_handle<> handle);
-
-        // 删除事件监听（内部使用）
-        void del_event(int fd, Event event);
+        void add_event(int fd, Event event, std::coroutine_handle<> handle, size_t thread_idx);
 
         // IO 线程工作函数
         void io_worker(size_t thread_idx);

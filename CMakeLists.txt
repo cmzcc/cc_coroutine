@@ -8,14 +8,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # 编译选项
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -O2")
 
-# 查找 spdlog 依赖
-find_package(spdlog CONFIG REQUIRED)
 
 # 源文件
 set(SOURCES
     src/scheduler/scheduler.cpp
     src/utils/timer.cpp
-    src/utils/logger.cpp
     src/io/io_manager.cpp
     src/io/fd_manager.cpp
     src/io/hook.cpp
@@ -23,27 +20,27 @@ set(SOURCES
     src/scheduler/work_stealing_scheduler.cpp
     src/safety/coroutine_safety.cpp
     src/safety/coroutine_cancellation.cpp  # 添加新的取消机制
+    src/utils/logger.cpp                   # 添加日志模块
 )
 
 # 头文件
 set(HEADERS
     include/core/coroutine.h
     include/scheduler/scheduler.h
-    include/utils/timer.h
-    include/utils/logger.h
+    include/scheduler/timer.h
     include/io/io_manager.h
     include/io/fd_manager.h
     include/io/hook.h
     include/scheduler/advanced_scheduler.h
     include/scheduler/work_stealing_scheduler.h
     include/safety/coroutine_safety.h
-    include/safety/coroutine_cancellation.h
+    include/safety/coroutine_cancellation.h  # 添加新的取消机制头文件
+    include/utils/logger.h                   # 添加日志模块头文件
     include/core/async_task.h
     include/core/memory_pool.h
 )
 
 # 创建库
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 add_library(modern_coro SHARED ${SOURCES})
 
 # 设置库的版本
@@ -58,8 +55,10 @@ target_include_directories(modern_coro PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 
-# 链接库
-target_link_libraries(modern_coro PRIVATE pthread dl spdlog::spdlog)
+# 查找并链接 spdlog
+find_package(fmt CONFIG REQUIRED)
+find_package(spdlog CONFIG REQUIRED)
+target_link_libraries(modern_coro PRIVATE fmt::fmt spdlog::spdlog pthread dl)
 
 
 # --- 测试框架配置（使用 vcpkg 的 GTest） ---

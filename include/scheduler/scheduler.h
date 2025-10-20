@@ -9,6 +9,7 @@
 #include <functional>
 #include <iostream>
 #include "utils/timer.h"
+#include "utils/logger.h"
 #include <memory>
 
 namespace modern_coro
@@ -139,11 +140,11 @@ namespace modern_coro
         void print_stats() const
         {
             auto stats = get_stats();
-            std::cout << "调度器统计信息:" << std::endl;
-            std::cout << "  活跃协程数: " << stats.active_coroutines << std::endl;
-            std::cout << "  队列任务数: " << stats.queued_tasks << std::endl;
-            std::cout << "  总调度数: " << stats.total_scheduled << std::endl;
-            std::cout << "  总完成数: " << stats.total_completed << std::endl;
+            SPDLOG_INFO("调度器统计信息:");
+            SPDLOG_INFO("  活跃协程数: {}", stats.active_coroutines);
+            SPDLOG_INFO("  队列任务数: {}", stats.queued_tasks);
+            SPDLOG_INFO("  总调度数: {}", stats.total_scheduled);
+            SPDLOG_INFO("  总完成数: {}", stats.total_completed);
         }
 
     protected:

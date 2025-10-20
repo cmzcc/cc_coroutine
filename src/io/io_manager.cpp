@@ -14,84 +14,84 @@ namespace modern_coro
     using namespace modern_coro::safety; // 使用安全命名空间
     using namespace modern_coro::logger; // 使用日志命名空间
 
-    IOManager::IOManager(size_t thread_count) : Scheduler(thread_count)
+    IOManager::IOManager(size_t thread_count, size_t io_thread_count) : Scheduler(thread_count)
     {
+        // 如果未指定 IO 线程数，默认为 CPU 核心数的一半，最少 1 个
+        if (io_thread_count == 0)
+        {
+            io_thread_count = std::max(size_t(1), size_t(std::thread::hardware_concurrency() / 2));
+        }
+        io_thread_count_ = io_thread_count;
+
+        LOG_INFO("Initializing IOManager with {} worker threads and {} IO threads",
+                   thread_count, io_thread_count_);
+
         try
         {
-            // 尝试创建epoll，如果失败则使用同步模式
-            epfd_ = epoll_create1(EPOLL_CLOEXEC);
-            if (epfd_ == -1)
+            if (!init_io_threads())
             {
-                LOG_MODULE_WARN(modules::IO_MANAGER, "epoll not available, falling back to synchronous I/O mode");
-                epfd_ = -1; // 标记为同步模式
+                LOG_WARN("Failed to initialize IO threads, falling back to synchronous mode");
+                sync_mode_ = true;
                 return;
             }
 
-            CHECK_SYSCALL(pipe(pipe_fd_), "IOManager pipe creation");
-
-            // 设置管道为非阻塞
-            int flags0 = safe_syscall("fcntl", "get pipe[0] flags", fcntl, pipe_fd_[0], F_GETFL, 0);
-            safe_syscall("fcntl", "set pipe[0] non-blocking", fcntl, pipe_fd_[0], F_SETFL, flags0 | O_NONBLOCK);
-
-            int flags1 = safe_syscall("fcntl", "get pipe[1] flags", fcntl, pipe_fd_[1], F_GETFL, 0);
-            safe_syscall("fcntl", "set pipe[1] non-blocking", fcntl, pipe_fd_[1], F_SETFL, flags1 | O_NONBLOCK);
-
-            // 添加管道读端到epoll
-            epoll_event ev;
-            ev.events = EPOLLIN;
-            ev.data.fd = pipe_fd_[0];
-            safe_syscall("epoll_ctl", "add pipe to epoll", epoll_ctl, epfd_, EPOLL_CTL_ADD, pipe_fd_[0], &ev);
-
-            io_thread_ = std::thread(&IOManager::io_worker, this);
-            LOG_MODULE_INFO(modules::IO_MANAGER, "IOManager initialized with epoll in async mode");
+            LOG_INFO("IOManager initialized successfully with {} IO threads", io_thread_count_);
         }
-        catch (const IOException &e)
+        catch (const std::exception &e)
         {
-            LOG_MODULE_ERROR(modules::IO_MANAGER, "Exception in IOManager constructor: {}", e.what());
-            // 清理已创建的资源
-            if (epfd_ >= 0)
-                close(epfd_);
-            if (pipe_fd_[0] >= 0)
-                close(pipe_fd_[0]);
-            if (pipe_fd_[1] >= 0)
-                close(pipe_fd_[1]);
-            LOG_MODULE_WARN(modules::IO_MANAGER, "Falling back to synchronous mode due to exception");
-            epfd_ = -1; // 标记为同步模式
-            // 不要重新抛出异常，而是回退到同步模式
-            // throw;
+            LOG_ERROR("Exception in IOManager constructor: {}", e.what());
+            sync_mode_ = true;
+            LOG_WARN("Falling back to synchronous mode due to exception");
         }
     }
 
     IOManager::~IOManager()
     {
-        io_stop_flag_ = true;
+        LOG_INFO("Shutting down IOManager with {} IO threads", io_thread_count_);
 
-        // 唤醒IO线程
-        char c = 1;
-        ssize_t result = write(pipe_fd_[1], &c, 1);
-        (void)result; // 避免未使用变量警告
-
-        if (io_thread_.joinable())
+        // 停止所有 IO 线程
+        for (auto &ctx : io_thread_contexts_)
         {
-            io_thread_.join();
+            if (ctx)
+            {
+                ctx->stop_flag = true;
+                // 唤醒 IO 线程
+                char c = 1;
+                if (ctx->pipe_fd[1] >= 0)
+                {
+                    ssize_t ret = write(ctx->pipe_fd[1], &c, 1);
+                    if (ret != 1)
+                    {
+                        LOG_ERROR("Failed to wake IO thread, write returned {}", ret);
+                    }
+                }
+            }
         }
 
-        close(pipe_fd_[0]);
-        close(pipe_fd_[1]);
-        close(epfd_);
+        // 等待所有 IO 线程结束
+        for (auto &ctx : io_thread_contexts_)
+        {
+            if (ctx && ctx->thread.joinable())
+            {
+                ctx->thread.join();
+            }
+        }
+
+        LOG_INFO("IOManager shutdown complete");
     }
 
     Task<ssize_t> IOManager::async_read(int fd, void *buffer, size_t size)
     {
         // 如果是同步模式，使用异步执行避免阻塞调度器
-        if (epfd_ == -1)
+        if (sync_mode_)
         {
+            LOG_DEBUG("Using synchronous read mode for fd {}", fd);
             // 在单独的线程中执行阻塞读取
             auto future = std::async(std::launch::async, [fd, buffer, size]()
                                      {
             ssize_t result = read(fd, buffer, size);
             if (result == -1) {
-                LOG_MODULE_ERROR(modules::IO_MANAGER, "Read error in sync mode (fd={}): {}", fd, std::strerror(errno));
+                LOG_ERROR("Read error in sync mode (fd={}): {}", fd, strerror(errno));
             }
             return result; });
 
@@ -99,25 +99,22 @@ namespace modern_coro
             co_return future.get();
         }
 
+        // 选择 IO 线程
+        size_t thread_idx = select_io_thread(fd);
+
         // 设置为非阻塞
-        try
-        {
-            int flags = safe_syscall("fcntl", "get fd flags for read", fcntl, fd, F_GETFL, 0);
-            safe_syscall("fcntl", "set fd non-blocking for read", fcntl, fd, F_SETFL, flags | O_NONBLOCK);
-        }
-        catch (const IOException &e)
-        {
-            LOG_MODULE_ERROR(modules::IO_MANAGER, "Failed to set non-blocking mode for fd {}: {}", fd, e.what());
-            co_return -1;
-        }
+        int flags = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
         ssize_t result = read(fd, buffer, size);
         if (is_would_block(result))
         {
+            LOG_DEBUG("Read would block for fd {}, scheduling async operation", fd);
             // 需要等待
             struct ReadAwaiter
             {
                 IOManager *manager;
+                size_t thread_idx;
                 int fd;
                 void *buffer;
                 size_t size;
@@ -126,7 +123,7 @@ namespace modern_coro
 
                 void await_suspend(std::coroutine_handle<> handle)
                 {
-                    manager->add_event(fd, IOManager::READ, handle);
+                    manager->add_event(fd, IOManager::READ, handle, thread_idx);
                 }
 
                 ssize_t await_resume()
@@ -134,14 +131,13 @@ namespace modern_coro
                     ssize_t result = read(fd, buffer, size);
                     if (result == -1 && !is_would_block(result) && !is_interrupted(result))
                     {
-                        // 记录真正的错误
-                        LOG_MODULE_ERROR(modules::IO_MANAGER, "Read error on fd {}: {}", fd, std::strerror(errno));
+                        LOG_ERROR("Read error on fd {}: {}", fd, strerror(errno));
                     }
                     return result;
                 }
             };
 
-            co_return co_await ReadAwaiter{this, fd, buffer, size};
+            co_return co_await ReadAwaiter{this, thread_idx, fd, buffer, size};
         }
         co_return result;
     }
@@ -149,14 +145,15 @@ namespace modern_coro
     Task<ssize_t> IOManager::async_write(int fd, const void *buffer, size_t size)
     {
         // 如果是同步模式，使用异步执行避免阻塞调度器
-        if (epfd_ == -1)
+        if (sync_mode_)
         {
+            LOG_DEBUG("Using synchronous write mode for fd {}", fd);
             // 在单独的线程中执行阻塞写入
             auto future = std::async(std::launch::async, [fd, buffer, size]()
                                      {
             ssize_t result = write(fd, buffer, size);
             if (result == -1) {
-                LOG_MODULE_ERROR(modules::IO_MANAGER, "Write error in sync mode (fd={}): {}", fd, std::strerror(errno));
+                LOG_ERROR("Write error in sync mode (fd={}): {}", fd, strerror(errno));
             }
             return result; });
 
@@ -164,25 +161,22 @@ namespace modern_coro
             co_return future.get();
         }
 
+        // 选择 IO 线程
+        size_t thread_idx = select_io_thread(fd);
+
         // 设置为非阻塞
-        try
-        {
-            int flags = safe_syscall("fcntl", "get fd flags for write", fcntl, fd, F_GETFL, 0);
-            safe_syscall("fcntl", "set fd non-blocking for write", fcntl, fd, F_SETFL, flags | O_NONBLOCK);
-        }
-        catch (const IOException &e)
-        {
-            LOG_MODULE_ERROR(modules::IO_MANAGER, "Failed to set non-blocking mode for fd {}: {}", fd, e.what());
-            co_return -1;
-        }
+        int flags = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
         ssize_t result = write(fd, buffer, size);
         if (is_would_block(result))
         {
+            LOG_DEBUG("Write would block for fd {}, scheduling async operation", fd);
             // 需要等待
             struct WriteAwaiter
             {
                 IOManager *manager;
+                size_t thread_idx;
                 int fd;
                 const void *buffer;
                 size_t size;
@@ -191,7 +185,7 @@ namespace modern_coro
 
                 void await_suspend(std::coroutine_handle<> handle)
                 {
-                    manager->add_event(fd, IOManager::WRITE, handle);
+                    manager->add_event(fd, IOManager::WRITE, handle, thread_idx);
                 }
 
                 ssize_t await_resume()
@@ -199,14 +193,13 @@ namespace modern_coro
                     ssize_t result = write(fd, buffer, size);
                     if (result == -1 && !is_would_block(result) && !is_interrupted(result))
                     {
-                        // 记录真正的错误
-                        LOG_MODULE_ERROR(modules::IO_MANAGER, "Write error on fd {}: {}", fd, std::strerror(errno));
+                        LOG_ERROR("Write error on fd {}: {}", fd, strerror(errno));
                     }
                     return result;
                 }
             };
 
-            co_return co_await WriteAwaiter{this, fd, buffer, size};
+            co_return co_await WriteAwaiter{this, thread_idx, fd, buffer, size};
         }
         co_return result;
     }
@@ -214,14 +207,15 @@ namespace modern_coro
     Task<int> IOManager::async_accept(int sockfd)
     {
         // 如果是同步模式，使用异步执行避免阻塞调度器
-        if (epfd_ == -1)
+        if (sync_mode_)
         {
+            LOG_DEBUG("Using synchronous accept mode for sockfd {}", sockfd);
             // 在单独的线程中执行阻塞accept
             auto future = std::async(std::launch::async, [sockfd]()
                                      {
             int result = accept(sockfd, nullptr, nullptr);
             if (result == -1) {
-                LOG_MODULE_ERROR(modules::IO_MANAGER, "Accept error in sync mode (sockfd={}): {}", sockfd, std::strerror(errno));
+                LOG_ERROR("Accept error in sync mode (sockfd={}): {}", sockfd, strerror(errno));
             }
             return result; });
 
@@ -229,32 +223,29 @@ namespace modern_coro
             co_return future.get();
         }
 
+        // 选择 IO 线程
+        size_t thread_idx = select_io_thread(sockfd);
+
         // 设置为非阻塞
-        try
-        {
-            int flags = safe_syscall("fcntl", "get sockfd flags for accept", fcntl, sockfd, F_GETFL, 0);
-            safe_syscall("fcntl", "set sockfd non-blocking for accept", fcntl, sockfd, F_SETFL, flags | O_NONBLOCK);
-        }
-        catch (const IOException &e)
-        {
-            std::cerr << "Failed to set non-blocking mode: " << e.what() << std::endl;
-            co_return -1;
-        }
+        int flags = fcntl(sockfd, F_GETFL, 0);
+        fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
 
         int result = accept(sockfd, nullptr, nullptr);
         if (is_would_block(result))
         {
+            LOG_DEBUG("Accept would block for sockfd {}, scheduling async operation", sockfd);
             // 需要等待
             struct AcceptAwaiter
             {
                 IOManager *manager;
+                size_t thread_idx;
                 int sockfd;
 
                 bool await_ready() const noexcept { return false; }
 
                 void await_suspend(std::coroutine_handle<> handle)
                 {
-                    manager->add_event(sockfd, IOManager::READ, handle);
+                    manager->add_event(sockfd, IOManager::READ, handle, thread_idx);
                 }
 
                 int await_resume()
@@ -262,14 +253,13 @@ namespace modern_coro
                     int result = accept(sockfd, nullptr, nullptr);
                     if (result == -1 && !is_would_block(result) && !is_interrupted(result))
                     {
-                        // 记录真正的错误
-                        std::cerr << "Accept error: " << std::strerror(errno) << std::endl;
+                        LOG_ERROR("Accept error on sockfd {}: {}", sockfd, strerror(errno));
                     }
                     return result;
                 }
             };
 
-            co_return co_await AcceptAwaiter{this, sockfd};
+            co_return co_await AcceptAwaiter{this, thread_idx, sockfd};
         }
         co_return result;
     }
@@ -277,14 +267,15 @@ namespace modern_coro
     Task<int> IOManager::async_connect(int sockfd, const struct ::sockaddr *addr, socklen_t addrlen)
     {
         // 如果是同步模式，使用异步执行避免阻塞调度器
-        if (epfd_ == -1)
+        if (sync_mode_)
         {
+            LOG_DEBUG("Using synchronous connect mode for sockfd {}", sockfd);
             // 在单独的线程中执行阻塞connect
             auto future = std::async(std::launch::async, [sockfd, addr, addrlen]()
                                      {
             int result = connect(sockfd, addr, addrlen);
             if (result == -1) {
-                std::cerr << "Connect error in sync mode: " << std::strerror(errno) << std::endl;
+                LOG_ERROR("Connect error in sync mode (sockfd={}): {}", sockfd, strerror(errno));
             }
             return result; });
 
@@ -292,32 +283,29 @@ namespace modern_coro
             co_return future.get();
         }
 
+        // 选择 IO 线程
+        size_t thread_idx = select_io_thread(sockfd);
+
         // 设置为非阻塞
-        try
-        {
-            int flags = safe_syscall("fcntl", "get sockfd flags for connect", fcntl, sockfd, F_GETFL, 0);
-            safe_syscall("fcntl", "set sockfd non-blocking for connect", fcntl, sockfd, F_SETFL, flags | O_NONBLOCK);
-        }
-        catch (const IOException &e)
-        {
-            std::cerr << "Failed to set non-blocking mode: " << e.what() << std::endl;
-            co_return -1;
-        }
+        int flags = fcntl(sockfd, F_GETFL, 0);
+        fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
 
         int result = connect(sockfd, addr, addrlen);
         if (result == -1 && errno == EINPROGRESS)
         {
+            LOG_DEBUG("Connect in progress for sockfd {}, scheduling async operation", sockfd);
             // 需要等待连接完成
             struct ConnectAwaiter
             {
                 IOManager *manager;
+                size_t thread_idx;
                 int sockfd;
 
                 bool await_ready() const noexcept { return false; }
 
                 void await_suspend(std::coroutine_handle<> handle)
                 {
-                    manager->add_event(sockfd, IOManager::WRITE, handle);
+                    manager->add_event(sockfd, IOManager::WRITE, handle, thread_idx);
                 }
 
                 int await_resume()
@@ -329,30 +317,43 @@ namespace modern_coro
                     {
                         if (error != 0)
                         {
-                            std::cerr << "Connect error: " << std::strerror(error) << std::endl;
+                            LOG_ERROR("Connect error on sockfd {}: {}", sockfd, strerror(error));
                             return -1;
                         }
                         return 0;
                     }
-                    std::cerr << "getsockopt error: " << std::strerror(errno) << std::endl;
+                    LOG_ERROR("getsockopt error on sockfd {}: {}", sockfd, strerror(errno));
                     return -1;
                 }
             };
 
-            co_return co_await ConnectAwaiter{this, sockfd};
+            co_return co_await ConnectAwaiter{this, thread_idx, sockfd};
         }
         co_return result;
     }
 
     void IOManager::add_event(int fd, Event event, std::coroutine_handle<> handle)
     {
-        std::lock_guard<std::mutex> lock(fd_mutex_);
+        size_t thread_idx = select_io_thread(fd);
+        add_event(fd, event, handle, thread_idx);
+    }
+
+    void IOManager::add_event(int fd, Event event, std::coroutine_handle<> handle, size_t thread_idx)
+    {
+        if (thread_idx >= io_thread_contexts_.size() || !io_thread_contexts_[thread_idx])
+        {
+            LOG_ERROR("Invalid IO thread index {} for fd {}", thread_idx, fd);
+            return;
+        }
+
+        auto &ctx = *io_thread_contexts_[thread_idx];
+        std::lock_guard<std::mutex> lock(ctx.fd_mutex);
 
         // 检查是否已经在epoll中
-        auto it = fd_contexts_.find(fd);
-        bool is_new = (it == fd_contexts_.end());
+        auto it = ctx.fd_contexts.find(fd);
+        bool is_new = (it == ctx.fd_contexts.end());
 
-        auto &ctx = fd_contexts_[fd]; // 这会创建新的条目
+        auto &fd_ctx = ctx.fd_contexts[fd]; // 这会创建新的条目
 
         epoll_event ev;
         ev.data.fd = fd;
@@ -360,77 +361,123 @@ namespace modern_coro
 
         if (event & READ)
         {
-            ctx.read_handle = handle;
+            fd_ctx.read_handle = handle;
             ev.events |= EPOLLIN;
         }
         if (event & WRITE)
         {
-            ctx.write_handle = handle;
+            fd_ctx.write_handle = handle;
             ev.events |= EPOLLOUT;
         }
 
         // 根据是否是新fd来决定使用ADD还是MOD
-        try
+        if (is_new)
         {
-            if (is_new)
+            if (epoll_ctl(ctx.epfd, EPOLL_CTL_ADD, fd, &ev) == -1)
             {
-                safe_syscall("epoll_ctl", "add fd to epoll", epoll_ctl, epfd_, EPOLL_CTL_ADD, fd, &ev);
+                LOG_ERROR("Failed to add fd {} to epoll in thread {}: {}", fd, thread_idx, strerror(errno));
             }
             else
             {
-                safe_syscall("epoll_ctl", "modify fd in epoll", epoll_ctl, epfd_, EPOLL_CTL_MOD, fd, &ev);
+                LOG_DEBUG("Added fd {} to epoll in thread {}", fd, thread_idx);
             }
         }
-        catch (const IOException &e)
+        else
         {
-            std::cerr << "Failed to manage epoll event: " << e.what() << std::endl;
+            if (epoll_ctl(ctx.epfd, EPOLL_CTL_MOD, fd, &ev) == -1)
+            {
+                LOG_ERROR("Failed to modify fd {} in epoll in thread {}: {}", fd, thread_idx, strerror(errno));
+            }
+            else
+            {
+                LOG_DEBUG("Modified fd {} in epoll in thread {}", fd, thread_idx);
+            }
+        }
+
+        // 更新全局映射
+        {
+            std::unique_lock lock(fd_to_thread_mutex_);
+            fd_to_thread_[fd] = thread_idx;
         }
     }
 
     void IOManager::del_event(int fd, Event event)
     {
-        std::lock_guard<std::mutex> lock(fd_mutex_);
+        // 查找该 fd 属于哪个线程
+        size_t thread_idx;
+        {
+            std::shared_lock lock(fd_to_thread_mutex_);
+            auto it = fd_to_thread_.find(fd);
+            if (it == fd_to_thread_.end())
+            {
+                return;
+            }
+            thread_idx = it->second;
+        }
 
-        auto it = fd_contexts_.find(fd);
-        if (it == fd_contexts_.end())
+        if (thread_idx >= io_thread_contexts_.size() || !io_thread_contexts_[thread_idx])
         {
             return;
         }
 
-        auto &ctx = it->second;
+        auto &ctx = *io_thread_contexts_[thread_idx];
+        std::lock_guard<std::mutex> lock(ctx.fd_mutex);
+
+        auto it = ctx.fd_contexts.find(fd);
+        if (it == ctx.fd_contexts.end())
+        {
+            return;
+        }
+
+        auto &fd_ctx = it->second;
 
         if (event & READ)
         {
-            ctx.read_handle = nullptr;
+            fd_ctx.read_handle = nullptr;
         }
         if (event & WRITE)
         {
-            ctx.write_handle = nullptr;
+            fd_ctx.write_handle = nullptr;
         }
 
         // 如果没有任何事件了，从epoll中删除
-        if (!ctx.read_handle && !ctx.write_handle)
+        if (!fd_ctx.read_handle && !fd_ctx.write_handle)
         {
-            try
+            if (epoll_ctl(ctx.epfd, EPOLL_CTL_DEL, fd, nullptr) == -1)
             {
-                safe_syscall("epoll_ctl", "delete fd from epoll", epoll_ctl, epfd_, EPOLL_CTL_DEL, fd, nullptr);
+                LOG_ERROR("Failed to delete fd {} from epoll in thread {}: {}", fd, thread_idx, strerror(errno));
             }
-            catch (const IOException &e)
+            else
             {
-                std::cerr << "Failed to delete fd from epoll: " << e.what() << std::endl;
+                LOG_DEBUG("Deleted fd {} from epoll in thread {}", fd, thread_idx);
             }
-            fd_contexts_.erase(it);
+            ctx.fd_contexts.erase(it);
+
+            // 从全局映射中移除
+            {
+                std::unique_lock lock(fd_to_thread_mutex_);
+                fd_to_thread_.erase(fd);
+            }
         }
     }
 
-    void IOManager::io_worker()
+    void IOManager::io_worker(size_t thread_idx)
     {
+        if (thread_idx >= io_thread_contexts_.size() || !io_thread_contexts_[thread_idx])
+        {
+            LOG_ERROR("Invalid thread index {} in io_worker", thread_idx);
+            return;
+        }
+
+        auto &ctx = *io_thread_contexts_[thread_idx];
+        LOG_DEBUG("IO worker thread {} started", thread_idx);
+
         const int max_events = 64;
         epoll_event events[max_events];
 
-        while (!io_stop_flag_)
+        while (!ctx.stop_flag)
         {
-            int nfds = epoll_wait(epfd_, events, max_events, 1000); // 1秒超时
+            int nfds = epoll_wait(ctx.epfd, events, max_events, 1000); // 1秒超时
 
             if (nfds == -1)
             {
@@ -438,7 +485,7 @@ namespace modern_coro
                 {
                     continue;
                 }
-                std::cerr << "epoll_wait failed: " << std::strerror(errno) << std::endl;
+                LOG_ERROR("epoll_wait failed in thread {}: {}", thread_idx, strerror(errno));
                 break;
             }
 
@@ -446,29 +493,32 @@ namespace modern_coro
             {
                 int fd = events[i].data.fd;
 
-                if (fd == pipe_fd_[0])
+                if (fd == ctx.pipe_fd[0])
                 {
                     // 唤醒信号，清空管道
                     char buffer[256];
-                    while (read(pipe_fd_[0], buffer, sizeof(buffer)) > 0)
+                    while (read(ctx.pipe_fd[0], buffer, sizeof(buffer)) > 0)
                         ;
                     continue;
                 }
 
-                std::lock_guard<std::mutex> lock(fd_mutex_);
-                auto it = fd_contexts_.find(fd);
-                if (it == fd_contexts_.end())
+                std::lock_guard<std::mutex> lock(ctx.fd_mutex);
+                auto it = ctx.fd_contexts.find(fd);
+                if (it == ctx.fd_contexts.end())
                 {
                     continue;
                 }
 
-                auto &ctx = it->second;
+                auto &fd_ctx = it->second;
                 uint32_t revents = events[i].events;
 
-                if ((revents & EPOLLIN) && ctx.read_handle)
+                if ((revents & EPOLLIN) && fd_ctx.read_handle)
                 {
-                    auto handle = ctx.read_handle;
-                    ctx.read_handle = nullptr;
+                    auto handle = fd_ctx.read_handle;
+                    fd_ctx.read_handle = nullptr;
+                    ctx.events_processed++;
+
+                    LOG_DEBUG("Resuming read coroutine for fd {} in thread {}", fd, thread_idx);
                     // 直接在IO线程中恢复协程，避免线程上下文切换
                     try
                     {
@@ -477,14 +527,17 @@ namespace modern_coro
                     }
                     catch (const std::exception &e)
                     {
-                        std::cerr << "Exception in coroutine resumption: " << e.what() << std::endl;
+                        LOG_ERROR("Exception in read coroutine resumption for fd {}: {}", fd, e.what());
                     }
                 }
 
-                if ((revents & EPOLLOUT) && ctx.write_handle)
+                if ((revents & EPOLLOUT) && fd_ctx.write_handle)
                 {
-                    auto handle = ctx.write_handle;
-                    ctx.write_handle = nullptr;
+                    auto handle = fd_ctx.write_handle;
+                    fd_ctx.write_handle = nullptr;
+                    ctx.events_processed++;
+
+                    LOG_DEBUG("Resuming write coroutine for fd {} in thread {}", fd, thread_idx);
                     // 直接在IO线程中恢复协程，避免线程上下文切换
                     try
                     {
@@ -493,11 +546,99 @@ namespace modern_coro
                     }
                     catch (const std::exception &e)
                     {
-                        std::cerr << "Exception in coroutine resumption: " << e.what() << std::endl;
+                        LOG_ERROR("Exception in write coroutine resumption for fd {}: {}", fd, e.what());
                     }
                 }
             }
         }
+
+        LOG_DEBUG("IO worker thread {} stopped", thread_idx);
+    }
+
+    // 选择处理该 fd 的 IO 线程（简单的 round-robin）
+    size_t IOManager::select_io_thread([[maybe_unused]] int fd)
+    {
+        return next_io_thread_.fetch_add(1, std::memory_order_relaxed) % io_thread_count_;
+    }
+
+    // 初始化 IO 线程
+    bool IOManager::init_io_threads()
+    {
+        try
+        {
+            io_thread_contexts_.reserve(io_thread_count_);
+
+            for (size_t i = 0; i < io_thread_count_; ++i)
+            {
+                auto ctx = std::make_unique<IOThreadContext>();
+
+                // 创建 epoll
+                ctx->epfd = epoll_create1(EPOLL_CLOEXEC);
+                if (ctx->epfd == -1)
+                {
+                    LOG_ERROR("Failed to create epoll for IO thread {}: {}", i, strerror(errno));
+                    return false;
+                }
+
+                // 创建管道
+                if (pipe(ctx->pipe_fd) == -1)
+                {
+                    LOG_ERROR("Failed to create pipe for IO thread {}: {}", i, strerror(errno));
+                    return false;
+                }
+
+                // 设置管道为非阻塞
+                int flags0 = fcntl(ctx->pipe_fd[0], F_GETFL, 0);
+                fcntl(ctx->pipe_fd[0], F_SETFL, flags0 | O_NONBLOCK);
+
+                int flags1 = fcntl(ctx->pipe_fd[1], F_GETFL, 0);
+                fcntl(ctx->pipe_fd[1], F_SETFL, flags1 | O_NONBLOCK);
+
+                // 添加管道读端到 epoll
+                epoll_event ev;
+                ev.events = EPOLLIN;
+                ev.data.fd = ctx->pipe_fd[0];
+                if (epoll_ctl(ctx->epfd, EPOLL_CTL_ADD, ctx->pipe_fd[0], &ev) == -1)
+                {
+                    LOG_ERROR("Failed to add pipe to epoll for IO thread {}: {}", i, strerror(errno));
+                    return false;
+                }
+
+                // 启动 IO 线程
+                ctx->thread = std::thread(&IOManager::io_worker, this, i);
+
+                io_thread_contexts_.push_back(std::move(ctx));
+                LOG_DEBUG("IO thread {} initialized successfully", i);
+            }
+
+            return true;
+        }
+        catch (const std::exception &e)
+        {
+            LOG_ERROR("Exception during IO thread initialization: {}", e.what());
+            return false;
+        }
+    }
+
+    // 获取 IO 统计信息
+    IOManager::IOStats IOManager::get_io_stats() const
+    {
+        IOStats stats;
+        stats.total_io_threads = io_thread_count_;
+        stats.per_thread_fds.resize(io_thread_count_);
+
+        for (size_t i = 0; i < io_thread_contexts_.size(); ++i)
+        {
+            if (io_thread_contexts_[i])
+            {
+                std::lock_guard<std::mutex> lock(io_thread_contexts_[i]->fd_mutex);
+                stats.per_thread_fds[i] = io_thread_contexts_[i]->fd_contexts.size();
+                stats.active_fds += stats.per_thread_fds[i];
+                stats.total_events_processed += io_thread_contexts_[i]->events_processed.load();
+            }
+        }
+
+        return stats;
     }
 
 } // namespace modern_coro

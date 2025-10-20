@@ -3,6 +3,7 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/rotating_file_sink.h>
 #include <filesystem>
+#include <iostream>
 #include <unordered_map>
 #include <mutex>
 
@@ -10,6 +11,35 @@ namespace modern_coro
 {
     namespace logger
     {
+
+        Logger::Logger()
+        {
+            // 默认初始化为控制台输出
+            try
+            {
+                // 创建控制台 sink（带颜色）
+                auto console_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+                console_sink->set_level(spdlog::level::trace);
+
+                // 创建同步 logger（避免异步初始化问题）
+                default_logger_ = std::make_shared<spdlog::logger>(
+                    "modern_coro",
+                    console_sink);
+
+                default_logger_->set_level(spdlog::level::info); // 默认级别为info
+                spdlog::register_logger(default_logger_);
+                initialized_ = true;
+
+                // 使用cout而不是LOG_INFO来避免递归
+                std::cout << "Logger initialized with default console output" << std::endl;
+            }
+            catch (const spdlog::spdlog_ex &ex)
+            {
+                // 如果spdlog初始化失败，回退到标准错误输出
+                std::cerr << "Failed to initialize spdlog: " << ex.what() << std::endl;
+                std::cerr << "Falling back to stderr logging" << std::endl;
+            }
+        }
 
         Logger &Logger::instance()
         {

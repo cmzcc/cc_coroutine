@@ -53,7 +53,7 @@ namespace modern_coro
             void flush();
 
         private:
-            Logger() = default;
+            Logger();
             ~Logger();
 
             Logger(const Logger &) = delete;

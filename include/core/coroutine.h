@@ -15,6 +15,7 @@
 #include <utility>
 #include "safety/coroutine_cancellation.h" // 添加新的取消机制
 #include "core/memory_pool.h"              // 引入对象池以优化分配
+#include "utils/logger.h"                  // 添加日志模块
 
 namespace modern_coro
 {
@@ -194,13 +195,13 @@ namespace modern_coro
             void release()
             {
                 int old_count = ref_count.fetch_sub(1, std::memory_order_acq_rel);
-                std::cout << "[DEBUG] SharedState::release - ref_count: " << old_count << " -> " << (old_count - 1) << std::endl;
+                SPDLOG_DEBUG("SharedState::release - ref_count: {} -> {}", old_count, old_count - 1);
                 if (old_count == 1)
                 {
                     bool expected = false;
                     if (destroyed.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
                     {
-                        std::cout << "[DEBUG] SharedState::release - Destroying handle: " << (handle ? handle.address() : nullptr) << std::endl;
+                        SPDLOG_DEBUG("SharedState::release - Destroying handle: {}", handle ? handle.address() : nullptr);
                         if (handle)
                         {
                             // 不在这里减少计数器，因为final_suspend已经处理了
@@ -209,21 +210,21 @@ namespace modern_coro
                             {
                                 if (!handle.done())
                                 {
-                                    std::cout << "[DEBUG] SharedState::release - Handle not done, destroying" << std::endl;
+                                    SPDLOG_DEBUG("SharedState::release - Handle not done, destroying");
                                     handle.destroy();
                                 }
                                 else
                                 {
-                                    std::cout << "[DEBUG] SharedState::release - Handle already done" << std::endl;
+                                    SPDLOG_DEBUG("SharedState::release - Handle already done");
                                 }
                             }
                             catch (...)
                             {
-                                std::cout << "[DEBUG] SharedState::release - Exception during handle destruction" << std::endl;
+                                SPDLOG_DEBUG("SharedState::release - Exception during handle destruction");
                                 // 忽略销毁异常
                             }
                         }
-                        std::cout << "[DEBUG] SharedState::release - Deleting SharedState" << std::endl;
+                        SPDLOG_DEBUG("SharedState::release - Deleting SharedState");
                         delete this;
                     }
                 }

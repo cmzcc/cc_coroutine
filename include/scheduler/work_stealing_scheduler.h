@@ -17,9 +17,6 @@ public:
     explicit WorkStealingScheduler(size_t thread_count = std::thread::hardware_concurrency());
     ~WorkStealingScheduler() override;
 
-    // 重写基类的stop方法
-    void stop();
-    
     // 重写基类的schedule方法 (注意：基类方法不是virtual，所以这是隐藏而不是重写)
     void schedule(std::function<void()> task);
     

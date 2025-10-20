@@ -13,6 +13,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../include)
 
 # 使用 vcpkg 的 GTest
 find_package(GTest CONFIG REQUIRED)
+find_package(fmt CONFIG REQUIRED)
 
 # 单元测试
 add_executable(unit_tests
@@ -31,6 +32,7 @@ target_link_libraries(unit_tests
     modern_coro
     GTest::gtest
     GTest::gtest_main
+    fmt::fmt
     pthread
 )
 
@@ -45,6 +47,7 @@ target_link_libraries(integration_tests
     modern_coro
     GTest::gtest
     GTest::gtest_main
+    fmt::fmt
     pthread
 )
 
