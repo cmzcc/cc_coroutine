@@ -64,22 +64,25 @@ namespace modern_coro
             auto keep = task.share_state_opaque();
             task.set_keep_alive(keep);
             auto handle = task.handle();
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                tasks_.emplace([handle, keep, callback = std::move(callback)]() mutable
-                               {
-                                   if (handle && !handle.done())
-                                   {
-                                       handle.resume();
-                                   }
-                                   if (callback)
-                                   {
-                                       callback();
-                                   }
-                                   // keep 在此作用域结束前保持，共享状态在协程 final_suspend 处自行解除
-                               });
-            }
-            cv_.notify_one();
+
+            // 使用 round-robin 选择一个 worker 队列
+            size_t queue_idx = next_queue_.fetch_add(1, std::memory_order_relaxed) % thread_count_;
+
+            worker_queues_[queue_idx]->push([handle, keep, callback = std::move(callback)]() mutable
+                                            {
+                                                if (handle && !handle.done())
+                                                {
+                                                    handle.resume();
+                                                }
+                                                if (callback)
+                                                {
+                                                    callback();
+                                                }
+                                                // keep 在此作用域结束前保持，共享状态在协程 final_suspend 处自行解除
+                                            });
+
+            // 唤醒对应的 worker
+            worker_queues_[queue_idx]->cv.notify_one();
         }
 
         void schedule(std::function<void()> func);
@@ -203,10 +206,6 @@ namespace modern_coro
 
         // 保留全局锁用于停止操作
         mutable std::mutex mutex_;
-
-        // 全局任务队列（用于schedule函数）
-        std::queue<std::function<void()>> tasks_;
-        std::condition_variable cv_;
 
         static thread_local Scheduler *current_scheduler_;
     };
