@@ -144,16 +144,16 @@ namespace modern_coro
         queue->push([this, func = std::move(func)]() mutable
                     {
 #if MODERN_CORO_DEBUG
-        std::cerr << "[DEBUG] executing scheduled task on thread " << std::this_thread::get_id() << std::endl;
+        LOG_MODULE_DEBUG(logger::modules::SCHEDULER, "Executing scheduled task on thread {}", std::this_thread::get_id());
 #endif
         try {
             func();
             total_completed_.fetch_add(1, std::memory_order_relaxed);
         } catch (const std::exception& e) {
-            std::cerr << "Task execution failed: " << e.what() << std::endl;
+            LOG_MODULE_ERROR(logger::modules::SCHEDULER, "Task execution failed: {}", e.what());
             total_completed_.fetch_add(1, std::memory_order_relaxed);
         } catch (...) {
-            std::cerr << "Task execution failed with unknown exception" << std::endl;
+            LOG_MODULE_ERROR(logger::modules::SCHEDULER, "Task execution failed with unknown exception");
             total_completed_.fetch_add(1, std::memory_order_relaxed);
         } });
 
@@ -169,16 +169,15 @@ namespace modern_coro
     Task<> Scheduler::sleep(std::chrono::milliseconds duration)
     {
 #if MODERN_CORO_DEBUG
-        std::cerr << "[DEBUG] Scheduler::sleep enter, this=" << this
-                  << " dur=" << duration.count() << "ms"
-                  << " tid=" << std::this_thread::get_id() << std::endl;
+        LOG_MODULE_DEBUG(logger::modules::SCHEDULER, "Scheduler::sleep enter, this={} dur={}ms tid={}",
+                         static_cast<void *>(this), duration.count(), std::this_thread::get_id());
 #endif
         Scheduler *s = Scheduler::GetCurrent();
         if (!s)
             s = this; // 兜底：若当前线程未注册，则退回到调用对象
 #if MODERN_CORO_DEBUG
-        std::cerr << "[DEBUG] Scheduler::sleep using scheduler=" << s
-                  << " timer=" << (s ? s->timer_.get() : nullptr) << std::endl;
+        LOG_MODULE_DEBUG(logger::modules::SCHEDULER, "Scheduler::sleep using scheduler={} timer={}",
+                         static_cast<void *>(s), static_cast<void *>(s ? s->timer_.get() : nullptr));
 #endif
         return s->timer_->sleep_for(duration);
     }
@@ -193,9 +192,8 @@ namespace modern_coro
         auto &my_queue = worker_queues_[my_queue_idx];
 
 #if MODERN_CORO_DEBUG
-        std::cerr << "[DEBUG] worker_thread started, scheduler=" << this
-                  << " queue_idx=" << my_queue_idx
-                  << " tid=" << std::this_thread::get_id() << std::endl;
+        LOG_MODULE_DEBUG(logger::modules::SCHEDULER, "Worker thread started, scheduler={} queue_idx={} tid={}",
+                         static_cast<void *>(this), my_queue_idx, std::this_thread::get_id());
 #endif
 
         while (true)

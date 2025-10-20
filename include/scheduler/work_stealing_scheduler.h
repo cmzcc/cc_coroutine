@@ -32,7 +32,7 @@ public:
                     callback();
                 }
             } catch (const std::exception& e) {
-                std::cerr << "Task execution failed: " << e.what() << std::endl;
+    
                 if (callback) {
                     callback();
                 }
