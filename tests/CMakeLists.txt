@@ -51,6 +51,27 @@ target_link_libraries(integration_tests
     pthread
 )
 
+# 压力测试
+add_executable(stress_test_iomanager
+    stress/stress_test_iomanager.cpp
+)
+
+target_link_libraries(stress_test_iomanager
+    modern_coro
+    fmt::fmt
+    pthread
+)
+
+add_executable(stress_test_scheduler
+    stress/stress_test_scheduler.cpp
+)
+
+target_link_libraries(stress_test_scheduler
+    modern_coro
+    fmt::fmt
+    pthread
+)
+
 # 启用测试
 enable_testing()
 
