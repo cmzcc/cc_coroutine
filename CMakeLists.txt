@@ -8,10 +8,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # 编译选项
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -O2")
 
+# 查找 spdlog 依赖
+find_package(spdlog CONFIG REQUIRED)
+
 # 源文件
 set(SOURCES
     src/scheduler/scheduler.cpp
     src/utils/timer.cpp
+    src/utils/logger.cpp
     src/io/io_manager.cpp
     src/io/fd_manager.cpp
     src/io/hook.cpp
@@ -26,6 +30,7 @@ set(HEADERS
     include/core/coroutine.h
     include/scheduler/scheduler.h
     include/utils/timer.h
+    include/utils/logger.h
     include/io/io_manager.h
     include/io/fd_manager.h
     include/io/hook.h
@@ -54,7 +59,7 @@ target_include_directories(modern_coro PUBLIC
 )
 
 # 链接库
-target_link_libraries(modern_coro PRIVATE pthread dl)
+target_link_libraries(modern_coro PRIVATE pthread dl spdlog::spdlog)
 
 
 # --- 测试框架配置（使用 vcpkg 的 GTest） ---
