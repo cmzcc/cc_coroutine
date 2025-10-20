@@ -193,4 +193,5 @@ void register_thread_on_scheduler(Scheduler* scheduler_ptr) {
 void unregister_thread_on_scheduler(Scheduler* scheduler_ptr) {
     if (scheduler_ptr) { scheduler_ptr->unregister_thread(); }
 }
+
 } // namespace modern_coro

@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <algorithm>
+#include <future>
 #include "scheduler/scheduler.h"
 #include "scheduler/advanced_scheduler.h"
 #include "scheduler/work_stealing_scheduler.h"
@@ -18,6 +19,9 @@ using namespace modern_coro;
 Task<int> compute_step1(int value);
 Task<int> compute_step2(int value);
 Task<int> compute_step3(int value);
+
+// 独立的协程函数，避免 lambda 捕获问题
+Task<> run_chain(int value, std::atomic<int>& completed_count);
 
 // 测试基础调度器的并发性能
 TEST(ConcurrentTasksTest, BasicSchedulerConcurrentTasks) {
@@ -220,26 +224,31 @@ TEST(ConcurrentTasksTest, CoroutineChainConcurrency) {
     scheduler.start();
 
     const int num_chains = 100;
-    std::atomic<int> completed_chains{0};
+
+    // 使用全局原子变量来避免栈变量问题
+    static std::atomic<int> completed_count{0};
 
     auto start_time = std::chrono::steady_clock::now();
 
+    // 预先创建所有协程任务，避免在循环中捕获循环变量
+    std::vector<Task<>> tasks;
     for (int i = 0; i < num_chains; ++i) {
-        auto chain_task = [&, i]() -> Task<> {
-            // 创建一个协程链
-            int result = co_await compute_step1(i);
-            result = co_await compute_step2(result);
-            result = co_await compute_step3(result);
+        tasks.push_back(run_chain(i, completed_count));
+    }
 
-            completed_chains.fetch_add(1);
-        }();
-
-        scheduler.schedule(std::move(chain_task));
+    // 调度所有任务
+    for (auto& task : tasks) {
+        scheduler.schedule(std::move(task));
     }
 
     // 等待所有链完成
-    while (completed_chains.load() < num_chains) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    auto timeout_time = start_time + std::chrono::seconds(5);
+    while (completed_count.load() < num_chains) {
+        auto now = std::chrono::steady_clock::now();
+        if (now > timeout_time) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
     auto end_time = std::chrono::steady_clock::now();
@@ -248,12 +257,12 @@ TEST(ConcurrentTasksTest, CoroutineChainConcurrency) {
 
     scheduler.stop();
 
-    EXPECT_EQ(completed_chains.load(), num_chains);
-
+    ASSERT_EQ(completed_count.load(), num_chains);
     std::cout << "Coroutine chains - Total time: " << total_duration.count() << "ms" << std::endl;
-}
 
-// 辅助函数：协程链的各个步骤
+    // 重置静态变量
+    completed_count.store(0);
+}// 辅助函数：协程链的各个步骤
 Task<int> compute_step1(int value) {
     co_await Scheduler::GetCurrent()->sleep(std::chrono::microseconds(50));
     co_return value * 2;
@@ -267,6 +276,16 @@ Task<int> compute_step2(int value) {
 Task<int> compute_step3(int value) {
     co_await Scheduler::GetCurrent()->sleep(std::chrono::microseconds(20));
     co_return value / 2;
+}
+
+// 独立的协程函数，避免 lambda 捕获问题
+Task<> run_chain(int value, std::atomic<int>& completed_count) {
+    // 创建一个协程链
+    int result = co_await compute_step1(value);
+    result = co_await compute_step2(result);
+    result = co_await compute_step3(result);
+
+    completed_count.fetch_add(1);
 }
 
 // 测试内存压力下的并发性能

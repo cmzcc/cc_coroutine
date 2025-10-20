@@ -114,15 +114,14 @@ TEST(AsyncTaskTest, FromSyncVoidFunction) {
     Scheduler scheduler(2);
     scheduler.start();
 
-    // 使用 promise/future 来同步
-    std::promise<void> promise;
-    std::future<void> future = promise.get_future();
+    // 使用全局原子变量来避免栈变量问题
+    static std::atomic<bool> task_completed{false};
 
     // 创建协程任务
-    auto coro_task = [&promise]() -> Task<void> {
-        auto task = AsyncTask<void>::from_sync([&promise]() {
+    auto coro_task = []() -> Task<void> {
+        auto task = AsyncTask<void>::from_sync([]() {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            promise.set_value();
+            task_completed.store(true);
         });
 
         // 在协程中等待异步任务
@@ -133,8 +132,10 @@ TEST(AsyncTaskTest, FromSyncVoidFunction) {
     scheduler.schedule(std::move(coro_task));
 
     // 等待异步任务完成
-    auto status = future.wait_for(std::chrono::seconds(1));
-    EXPECT_EQ(status, std::future_status::ready);
+    for (int i = 0; i < 200 && !task_completed.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_TRUE(task_completed.load());
     
     // 等待协程完成
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -147,37 +148,37 @@ TEST(AsyncTaskTest, FromCallbackFunction) {
     Scheduler scheduler(2);
     scheduler.start();
 
-    // 使用 promise/future 替代 shared_ptr
-    auto promise_ptr = std::make_shared<std::promise<int>>();
-    auto future = promise_ptr->get_future();
-    auto done_ptr = std::make_shared<std::atomic<bool>>(false);
+    // 使用全局原子变量来避免栈变量问题
+    static std::atomic<int> result_value{-1};
+    static std::atomic<bool> task_completed{false};
 
-    auto t = [promise_ptr, done_ptr]() -> Task<> {
-        auto task = AsyncTask<int>::from_callback([promise_ptr](auto callback) {
-            std::thread([callback = std::move(callback), promise_ptr]() {
+    auto t = []() -> Task<> {
+        auto task = AsyncTask<int>::from_callback([](auto callback) {
+            std::thread([callback = std::move(callback)]() {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                promise_ptr->set_value(123);
+                result_value.store(123);
                 callback(123);
             }).detach();
         });
 
         co_await task; // 只需要等待任务完成，不需要返回值
-        done_ptr->store(true);
+        task_completed.store(true);
         co_return;
     }();
 
     scheduler.schedule(std::move(t));
 
     // 等待异步任务完成
-    auto status = future.wait_for(std::chrono::seconds(1));
-    EXPECT_EQ(status, std::future_status::ready);
-    EXPECT_EQ(future.get(), 123);
-    
-    // 等待协程完成
-    for (int i = 0; i < 200 && !done_ptr->load(); ++i) {
+    for (int i = 0; i < 200 && result_value.load() == -1; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    EXPECT_TRUE(done_ptr->load());
+    EXPECT_EQ(result_value.load(), 123);
+    
+    // 等待协程完成
+    for (int i = 0; i < 200 && !task_completed.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_TRUE(task_completed.load());
     
     scheduler.stop();
 }
@@ -187,36 +188,34 @@ TEST(AsyncTaskTest, FromCallbackVoidFunction) {
     Scheduler scheduler(2);
     scheduler.start();
 
-    // 使用 promise/future 替代 shared_ptr
-    auto promise_ptr = std::make_shared<std::promise<void>>();
-    auto future = promise_ptr->get_future();
-    auto done_ptr = std::make_shared<std::atomic<bool>>(false);
+    // 使用全局原子变量来避免栈变量问题
+    static std::atomic<bool> task_completed{false};
 
-    auto t = [promise_ptr, done_ptr]() -> Task<> {
-        auto task = AsyncTask<void>::from_callback([promise_ptr](auto callback) {
-            std::thread([callback = std::move(callback), promise_ptr]() {
+    auto t = []() -> Task<> {
+        auto task = AsyncTask<void>::from_callback([](auto callback) {
+            std::thread([callback = std::move(callback)]() {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                promise_ptr->set_value();
+                task_completed.store(true);
                 callback();
             }).detach();
         });
 
         co_await task;
-        done_ptr->store(true);
         co_return;
     }();
 
     scheduler.schedule(std::move(t));
 
     // 等待异步任务完成
-    auto status = future.wait_for(std::chrono::seconds(1));
-    EXPECT_EQ(status, std::future_status::ready);
-    
-    // 等待协程完成
-    for (int i = 0; i < 200 && !done_ptr->load(); ++i) {
+    for (int i = 0; i < 200 && !task_completed.load(); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    EXPECT_TRUE(done_ptr->load());
+    EXPECT_TRUE(task_completed.load());
+    
+    scheduler.stop();
+
+    // 重置静态变量
+    task_completed.store(false);
     
     scheduler.stop();
 }

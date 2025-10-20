@@ -1,4 +1,7 @@
 #include <gtest/gtest.h>
+#include <atomic>
+#include <thread>
+#include <chrono>
 #include "scheduler/scheduler.h"
 
 using namespace modern_coro;
@@ -7,11 +10,12 @@ TEST(TimerTest, SleepForResumes) {
 	Scheduler scheduler(1);
 	scheduler.start();
 
-	std::atomic<bool> done{false};
+	// 使用全局原子变量来避免栈变量问题
+	static std::atomic<bool> done{false};
 	auto before = std::chrono::steady_clock::now();
 
-	auto t = [&]() -> Task<> {
-		co_await scheduler.sleep(std::chrono::milliseconds(20));
+	auto t = []() -> Task<> {
+		co_await Scheduler::GetCurrent()->sleep(std::chrono::milliseconds(20));
 		done.store(true);
 	}();
 	scheduler.schedule(std::move(t));
@@ -25,4 +29,7 @@ TEST(TimerTest, SleepForResumes) {
 	EXPECT_TRUE(done.load());
 	auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(after - before).count();
 	EXPECT_GE(ms, 15); // 粗略校验
+
+	// 重置静态变量
+	done.store(false);
 }

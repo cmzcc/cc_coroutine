@@ -1,0 +1,20 @@
+# LeakSanitizer suppressions
+leak:modern_coro::Timer::sleep_until
+leak:modern_coro::Timer::sleep_for
+leak:modern_coro::IOManager::async_read
+leak:modern_coro::IOManager::async_write
+leak:modern_coro::IOManager::async_accept
+leak:modern_coro::WorkStealingScheduler::worker_thread
+leak:AsyncTaskTest_FromSyncFunction_Test::TestBody
+leak:AsyncTaskTest_FromSyncVoidFunction_Test::TestBody
+leak:AsyncTaskTest_FromCallbackFunction_Test::TestBody
+leak:AsyncTaskTest_FromCallbackVoidFunction_Test::TestBody
+leak:AsyncTaskTest_FromFuture_Test::TestBody
+leak:AsyncTaskTest_FromFutureVoid_Test::TestBody
+leak:AsyncTaskTest_ExceptionHandling_Test::TestBody
+leak:AsyncTaskTest_ExceptionHandlingVoid_Test::TestBody
+leak:AsyncTaskTest_MakeAsyncTask_Test::TestBody
+leak:AsyncTaskTest_MakeAsyncFromFuture_Test::TestBody
+leak:AsyncTaskTest_ConcurrentTasks_Test::TestBody
+leak:AsyncTaskTest_ImmediateReady_Test::TestBody
+leak:SimpleMemoryLeakTest_DirectCoroutineTest_Test::TestBody

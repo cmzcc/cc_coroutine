@@ -119,7 +119,7 @@ public:
     void await_suspend(std::coroutine_handle<> continuation) {
         if (!state_) {
             // 如果 state 为空，直接恢复协程
-            modern_coro::schedule_coroutine_task([continuation]() mutable {
+            modern_coro::schedule_coroutine_task([continuation = std::move(continuation)]() mutable {
                 if (continuation) {
                     continuation.resume();
                 }
@@ -131,14 +131,14 @@ public:
         if (!register_continuation(state_, continuation, scheduler)) {
             // Task already completed, resume immediately
             if (scheduler) {
-                scheduler->schedule([continuation]() mutable {
+                scheduler->schedule([continuation = std::move(continuation)]() mutable {
                     if (continuation) {
                         continuation.resume();
                     }
                 });
             } else {
                 // Use schedule_coroutine_task to avoid direct resume in await_suspend
-                modern_coro::schedule_coroutine_task([continuation]() mutable {
+                modern_coro::schedule_coroutine_task([continuation = std::move(continuation)]() mutable {
                     if (continuation) {
                         continuation.resume();
                     }
@@ -263,7 +263,7 @@ private:
         // If no scheduler is available, use schedule_coroutine_task for proper async handling
         if (!target_scheduler) {
             if (continuation) {
-                modern_coro::schedule_coroutine_task([continuation]() mutable {
+                modern_coro::schedule_coroutine_task([continuation = std::move(continuation)]() mutable {
                     if (continuation) {
                         continuation.resume();
                     }
@@ -282,14 +282,14 @@ private:
         }
 
         if (scheduler) {
-            scheduler->schedule([continuation]() mutable {
+            scheduler->schedule([continuation = std::move(continuation)]() mutable {
                 if (continuation) {
                     continuation.resume();
                 }
             });
         } else {
             // Use schedule_coroutine_task to avoid direct resume
-            modern_coro::schedule_coroutine_task([continuation]() mutable {
+            modern_coro::schedule_coroutine_task([continuation = std::move(continuation)]() mutable {
                 if (continuation) {
                     continuation.resume();
                 }

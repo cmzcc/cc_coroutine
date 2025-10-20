@@ -116,7 +116,7 @@ namespace modern_coro
 
                         if (scheduler_ptr)
                         {
-                            schedule_coroutine_task([continuation]()
+                            schedule_coroutine_task([continuation = std::move(continuation)]() mutable
                                                     { continuation.resume(); });
                         }
                         else
@@ -194,11 +194,13 @@ namespace modern_coro
             void release()
             {
                 int old_count = ref_count.fetch_sub(1, std::memory_order_acq_rel);
+                std::cout << "[DEBUG] SharedState::release - ref_count: " << old_count << " -> " << (old_count - 1) << std::endl;
                 if (old_count == 1)
                 {
                     bool expected = false;
                     if (destroyed.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
                     {
+                        std::cout << "[DEBUG] SharedState::release - Destroying handle: " << (handle ? handle.address() : nullptr) << std::endl;
                         if (handle)
                         {
                             // 不在这里减少计数器，因为final_suspend已经处理了
@@ -388,7 +390,7 @@ namespace modern_coro
 
                         if (scheduler_ptr)
                         {
-                            schedule_coroutine_task([continuation]()
+                            schedule_coroutine_task([continuation = std::move(continuation)]() mutable
                                                     { continuation.resume(); });
                         }
                         else

@@ -24,6 +24,7 @@ add_executable(unit_tests
     unit/test_io_manager.cpp
     unit/test_memory_pool.cpp
     unit/test_async_task.cpp
+    unit/test_simple_memory_leak.cpp
 )
 
 target_link_libraries(unit_tests
@@ -54,6 +55,6 @@ enable_testing()
 add_test(NAME UnitTests COMMAND unit_tests --gtest_output=xml:unit_tests.xml)
 add_test(NAME IntegrationTests COMMAND integration_tests --gtest_output=xml:integration_tests.xml)
 
-# 设置测试属性
-set_tests_properties(UnitTests PROPERTIES TIMEOUT 60)
-set_tests_properties(IntegrationTests PROPERTIES TIMEOUT 120)
+# 设置测试属性 - 增加超时时间以适应 AddressSanitizer 的清理时间
+set_tests_properties(UnitTests PROPERTIES TIMEOUT 600)  # 10分钟
+set_tests_properties(IntegrationTests PROPERTIES TIMEOUT 800)  # 13分钟

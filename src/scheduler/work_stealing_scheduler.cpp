@@ -19,7 +19,28 @@ WorkStealingScheduler::WorkStealingScheduler(size_t thread_count)
 }
 
 WorkStealingScheduler::~WorkStealingScheduler() {
-    stop();
+    // 不要在这里调用stop()，让基类处理
+}
+
+void WorkStealingScheduler::stop() {
+    // 先设置停止标志
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stop_flag_ = true;
+    }
+    cv_.notify_all();
+    
+    // 等待所有工作线程停止
+    for (auto& worker : workers_) {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+    workers_.clear();
+
+    // 现在可以安全地清理工作窃取特定的数据
+    // 基类的stop()会处理剩余的任务清理
+    Scheduler::stop();
 }
 
 void WorkStealingScheduler::schedule(std::function<void()> task) {
@@ -115,12 +136,12 @@ void WorkStealingScheduler::worker_thread() {
             found_task = true;
         }
         // 2. 如果本地队列为空，尝试窃取工作
-        else if (try_steal_work(thread_idx, task)) {
+        else if (!stop_flag_.load() && try_steal_work(thread_idx, task)) {
             found_task = true;
             stealing_stats_.successful_steals.fetch_add(1);
         }
         
-        if (found_task) {
+        if (found_task && !stop_flag_.load()) {
             try {
                 task();
                 local_queue->executed_tasks.fetch_add(1);
@@ -150,6 +171,10 @@ void WorkStealingScheduler::worker_thread() {
 }
 
 size_t WorkStealingScheduler::get_current_thread_index() {
+    if (stop_flag_.load()) {
+        return SIZE_MAX;
+    }
+    
     std::thread::id current_id = std::this_thread::get_id();
     auto it = thread_id_to_index_.find(current_id);
     return (it != thread_id_to_index_.end()) ? it->second : SIZE_MAX;
