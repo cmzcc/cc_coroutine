@@ -23,7 +23,7 @@ struct SchedulerTestConfig
     std::string test_name;
 };
 
-struct SchedulerPerf Stats
+struct SchedulerPerfStats
 {
     std::atomic<size_t> tasks_completed{0};
     std::atomic<size_t> total_task_time_us{0};

@@ -39,8 +39,11 @@ protected:
 
 // 简化的异步读写测试协程
 Task<void> simple_async_read_test(IOManager* io_mgr, std::atomic<bool>& completed) {
+    std::cout << "Coroutine started" << std::endl;
+
     int pipefd[2];
     if (pipe(pipefd) != 0) {
+        std::cout << "Failed to create pipe" << std::endl;
         co_return;
     }
 
@@ -51,20 +54,32 @@ Task<void> simple_async_read_test(IOManager* io_mgr, std::atomic<bool>& complete
     const char* test_data = "Hello";
     size_t data_len = strlen(test_data);
 
+    std::cout << "Writing data synchronously to pipe" << std::endl;
+
     // 同步写入数据
     ssize_t sync_write_len = write(pipefd[1], test_data, data_len);
     if (sync_write_len != static_cast<ssize_t>(data_len)) {
+        std::cout << "Sync write failed: " << sync_write_len << " != " << data_len << std::endl;
         close(pipefd[0]);
         close(pipefd[1]);
         co_return;
     }
 
+    std::cout << "Data written, now reading asynchronously" << std::endl;
+
     // 异步读取数据
     char buffer[256] = {0};
+    std::cout << "About to call async_read" << std::endl;
     ssize_t read_len = co_await io_mgr->async_read(pipefd[0], buffer, sizeof(buffer));
 
+    std::cout << "Async read completed: read " << read_len << " bytes" << std::endl;
+
     if (read_len == static_cast<ssize_t>(data_len) && strcmp(buffer, test_data) == 0) {
+        std::cout << "Test passed!" << std::endl;
         completed = true;
+    } else {
+        std::cout << "Test failed: read_len=" << read_len << ", expected=" << data_len
+                  << ", buffer='" << buffer << "', expected='" << test_data << "'" << std::endl;
     }
 
     close(pipefd[0]);
@@ -73,27 +88,40 @@ Task<void> simple_async_read_test(IOManager* io_mgr, std::atomic<bool>& complete
 
 // 测试异步读写
 TEST_F(IOManagerTest, AsyncReadWrite) {
+    std::cout << "Test started" << std::endl;
+
     // 确保没有遗留的调度器线程
     if (scheduler_thread_.joinable()) {
+        std::cout << "Stopping existing scheduler thread" << std::endl;
         io_manager_->stop();
         scheduler_thread_.join();
     }
 
+    std::cout << "Starting scheduler" << std::endl;
     start_scheduler();
 
     // 等待调度器启动
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::cout << "Scheduler started" << std::endl;
+
+    // 检查IOManager是否在同步模式
+    std::cout << "IOManager sync_mode check..." << std::endl;
 
     // 调度简化的异步测试协程
+    std::cout << "Scheduling coroutine" << std::endl;
     io_manager_->schedule(simple_async_read_test(io_manager_.get(), test_completed_));
+
+    std::cout << "Coroutine scheduled" << std::endl;
 
     // 等待测试完成
     auto start_time = std::chrono::steady_clock::now();
     while (!test_completed_ &&
            std::chrono::steady_clock::now() - start_time < std::chrono::seconds(5)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::cout << "Waiting for test completion... completed=" << test_completed_.load() << std::endl;
     }
 
+    std::cout << "Test completed: " << test_completed_.load() << std::endl;
     EXPECT_TRUE(test_completed_);
 }
 
