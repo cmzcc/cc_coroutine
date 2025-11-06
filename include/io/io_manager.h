@@ -8,7 +8,6 @@
 #include <unordered_map>
 #include <chrono>
 #include <atomic>
-
 namespace modern_coro
 {
 

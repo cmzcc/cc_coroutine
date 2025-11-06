@@ -409,105 +409,6 @@ Task<void> handle(IOManager* io, int cfd) {
     }
     close(cfd);
 }
-    ## 架构设计
-
-    本节从更系统的角度描述 modern_coro 的内部结构与运行机制，帮助在生产环境中进行评估、调优与扩展。
-
-    ### 1) 组件视图（Component View）
-    - Task<T>：协程结果的抽象，承载 promise 与异常传播。
-    - Awaiter：与具体异步原语绑定（I/O、Timer），负责挂起/恢复。
-    - Scheduler：线程池与任务队列；Advanced/Work-stealing 为变体。
-    - IOManager：在 Scheduler 之上叠加 I/O 事件中心（epoll + 同步回退）。
-    - Timer：时间轮/最小堆结构，按期恢复等待的协程。
-    - MemoryPool：小对象池与可选协程栈池，降低分配成本。
-    - Safety：系统调用包装、异常类型与取消/超时机制。
-
-    它们之间的关系：
-    - 业务协程通过 co_await IO/Timer awaiter 挂起；
-    - IOManager 的 I/O 线程或 Timer 驱动在事件就绪时恢复协程；
-    - 恢复点可直接在 I/O 线程执行，或交由 Scheduler 选定的工作线程继续执行；
-    - 所有公共 API 通过 Safety 统一错误与异常语义。
-
-    ### 2) 线程与执行模型（Concurrency Model）
-    - 工作线程：Scheduler 启动 N 个工作线程，执行任务队列中的就绪协程。
-    - I/O 线程：IOManager 在 epoll 模式下维护一个专用 I/O 线程，负责 epoll_wait 与分发事件。
-    - 回退模式：若 epoll 初始化失败，async_* 在独立后台线程（std::async）中执行阻塞调用，避免阻塞工作线程。
-    - 工作窃取：Work-stealing 变体为每线程维护双端队列，空闲线程从他人队列尾部窃取以平衡负载。
-
-    线程亲和与恢复：
-    - 默认在 I/O 线程进行协程 resume；如需固定到特定工作线程，可在 awaiter 恢复时将 handle 交给 Scheduler.schedule。
-    - 避免跨线程频繁切换大型对象，减少内存迁移成本。
-
-    ### 3) I/O 事件流（Sequence）
-    以 async_read 为例（epoll 模式）：
-    1. 调用方 co_await io->async_read(fd, buf, sz)。
-    2. await_suspend：
-       - 将 fd 设为 O_NONBLOCK（若尚未设定）。
-       - 在 fd 上注册/修改 EPOLLIN | EPOLLET，关联当前协程句柄。
-       - 返回 true，挂起协程。
-    3. I/O 线程 epoll_wait 返回后，找到 fd 对应句柄，调用 resume。
-    4. 协程恢复后循环 read，直到读取完成或返回 EAGAIN；若未完成，重新挂起等待下一次事件；否则返回结果。
-
-    async_accept/async_connect 类似：
-    - accept：监听 fd 注册 EPOLLIN，事件到来后执行 accept 循环处理短连接风暴；
-    - connect：非阻塞 connect 若返回 EINPROGRESS，注册 EPOLLOUT 等待写就绪，随后检查 SO_ERROR 判定成功或失败。
-
-    同步回退模式下：
-    - await_suspend 启动一个 std::async 执行阻塞 read/accept/connect；完成后在后台线程中 resume 协程，或把句柄投递回调度器队列。
-
-    ### 4) Awaiter 状态机（Single-Resume Guarantee）
-    状态与约束：
-    - Init -> Pending（挂起，已注册事件）-> Ready（事件触发）-> Resumed（一次性恢复）-> Completed。
-    - Awaiter 保证“单次恢复”语义：无论边沿/电平特性或 spurious 事件，都会通过内部标志与互斥确保同一协程句柄只恢复一次。
-    - 错误路径会直接进入 Completed 并携带异常。
-
-    ### 5) 调度与工作窃取协作
-    - I/O 线程尽量做少量工作，仅负责 resume 或将任务投递至 Scheduler，避免阻塞 epoll 循环。
-    - Work-stealing 在高并发短任务场景下提升吞吐与资源利用率；
-    - 队列策略：本线程 LIFO、他线程 FIFO 窃取，改善缓存局部性与尾延迟。
-
-    ### 6) 定时器、取消与超时
-    - Timer 维护一个按到期时间排序的数据结构，到期时恢复协程；
-    - CancellationToken 在 await 之前与恢复之后校验中断信号；
-    - 超时通常以“定时器 + 取消”组合实现，触发后抛出异常（如 CoroutineTimeoutException）。
-
-    ### 7) 资源生命周期（FD/Handle/内存）
-    - FD 生命周期：
-      - 注册前检查 fd 上下文是否存在，首登用 EPOLL_CTL_ADD，后续使用 MOD；
-      - 关闭 fd 前先执行 EPOLL_CTL_DEL 并清理回调句柄，防止悬挂。
-    - 句柄与内存：
-      - 协程句柄由 Task 与 awaiter 管理；
-      - 小对象从 MemoryPool 获取，压力回落后可 shrink_to_fit；
-      - 所有路径使用 RAII（FdGuard/ScopeGuard）避免泄漏。
-
-    ### 8) 异常与错误传播
-    - 所有系统调用经 Safety 封装：将 errno 映射为具名异常（IOException 等），携带上下文信息；
-    - 异常在 Task 调用链中自然传播，调用者可 co_await 并 try/catch；
-    - I/O 中区分可重试错误（EAGAIN/EINTR）与致命错误（ECONNRESET 等）。
-
-    ### 9) 同步回退策略（Degradation）
-    - 触发条件：epoll 创建失败或运行中检测到不可恢复错误；
-    - 行为：async_* 转为 std::async 后台阻塞 I/O；
-    - 影响：语义等价但吞吐降低，适合受限环境与测试；
-    - 可观测性：is_sync_mode() 暴露当前模式，便于测试断言与运维告警。
-
-    ### 10) 优雅关闭（Graceful Shutdown）
-    建议顺序：
-    1. 停止对外接受新任务/连接；
-    2. 通知业务协程尽快收敛（可通过取消/自定义信号）；
-    3. IOManager 唤醒 epoll（自唤醒管道）并退出 I/O 线程循环；
-    4. Scheduler 等待工作线程 drain 并 join；
-    5. 释放内存池等资源。
-
-    ### 11) 可扩展性与配置
-    - 可插拔日志：接入 spdlog/自定义后端，支持等级与结构化输出；
-    - 多平台 I/O：抽象 I/O provider，后续支持 kqueue/IOCP/io_uring；
-    - 策略参数：
-      - 调度线程数：按 CPU 核心与任务类型配置；
-      - I/O 触发模式：保持 EPOLLET，配合“读/写到 EAGAIN”策略；
-      - 内存池大小与收缩策略；
-    - 指标：暴露执行统计、队列长度、窃取次数、I/O 错误率等，便于监控告警。
-
 
 Task<void> server(IOManager* io, int port, std::atomic<bool>& running) {
     int lfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -543,6 +444,105 @@ th.join();
 - 多线程环境下大量短任务，观察 steals/吞吐量
 - 用 Advanced/Work-stealing 调度器替代基础 Scheduler
 
+---
+  ## 架构设计
+
+  本节从更系统的角度描述 modern_coro 的内部结构与运行机制，帮助在生产环境中进行评估、调优与扩展。
+
+  ### 1) 组件视图（Component View）
+  - Task<T>：协程结果的抽象，承载 promise 与异常传播。
+    - Awaiter：与具体异步原语绑定（I/O、Timer），负责挂起/恢复。
+    - Scheduler：线程池与任务队列；Advanced/Work-stealing 为变体。
+    - IOManager：在 Scheduler 之上叠加 I/O 事件中心（epoll + 同步回退）。
+    - Timer：时间轮/最小堆结构，按期恢复等待的协程。
+    - MemoryPool：小对象池与可选协程栈池，降低分配成本。
+    - Safety：系统调用包装、异常类型与取消/超时机制。
+
+    它们之间的关系：
+    - 业务协程通过 co_await IO/Timer awaiter 挂起；
+    - IOManager 的 I/O 线程或 Timer 驱动在事件就绪时恢复协程；
+    - 恢复点可直接在 I/O 线程执行，或交由 Scheduler 选定的工作线程继续执行；
+    - 所有公共 API 通过 Safety 统一错误与异常语义。
+
+  ### 2) 线程与执行模型（Concurrency Model）
+  - 工作线程：Scheduler 启动 N 个工作线程，执行任务队列中的就绪协程。
+    - I/O 线程：IOManager 在 epoll 模式下维护一个专用 I/O 线程，负责 epoll_wait 与分发事件。
+    - 回退模式：若 epoll 初始化失败，async_* 在独立后台线程（std::async）中执行阻塞调用，避免阻塞工作线程。
+    - 工作窃取：Work-stealing 变体为每线程维护双端队列，空闲线程从他人队列尾部窃取以平衡负载。
+
+    线程亲和与恢复：
+    - 默认在 I/O 线程进行协程 resume；如需固定到特定工作线程，可在 awaiter 恢复时将 handle 交给 Scheduler.schedule。
+    - 避免跨线程频繁切换大型对象，减少内存迁移成本。
+
+  ### 3) I/O 事件流（Sequence）
+  以 async_read 为例（epoll 模式）：
+  1. 调用方 co_await io->async_read(fd, buf, sz)。
+    2. await_suspend：
+       - 将 fd 设为 O_NONBLOCK（若尚未设定）。
+       - 在 fd 上注册/修改 EPOLLIN | EPOLLET，关联当前协程句柄。
+       - 返回 true，挂起协程。
+    3. I/O 线程 epoll_wait 返回后，找到 fd 对应句柄，调用 resume。
+    4. 协程恢复后循环 read，直到读取完成或返回 EAGAIN；若未完成，重新挂起等待下一次事件；否则返回结果。
+
+  async_accept/async_connect 类似：
+    - accept：监听 fd 注册 EPOLLIN，事件到来后执行 accept 循环处理短连接风暴；
+    - connect：非阻塞 connect 若返回 EINPROGRESS，注册 EPOLLOUT 等待写就绪，随后检查 SO_ERROR 判定成功或失败。
+
+    同步回退模式下：
+    - await_suspend 启动一个 std::async 执行阻塞 read/accept/connect；完成后在后台线程中 resume 协程，或把句柄投递回调度器队列。
+
+  ### 4) Awaiter 状态机（Single-Resume Guarantee）
+  状态与约束：
+  - Init -> Pending（挂起，已注册事件）-> Ready（事件触发）-> Resumed（一次性恢复）-> Completed。
+  - Awaiter 保证“单次恢复”语义：无论边沿/电平特性或 spurious 事件，都会通过内部标志与互斥确保同一协程句柄只恢复一次。
+  - 错误路径会直接进入 Completed 并携带异常。
+
+  ### 5) 调度与工作窃取协作
+  - I/O 线程尽量做少量工作，仅负责 resume 或将任务投递至 Scheduler，避免阻塞 epoll 循环。
+    - Work-stealing 在高并发短任务场景下提升吞吐与资源利用率；
+    - 队列策略：本线程 LIFO、他线程 FIFO 窃取，改善缓存局部性与尾延迟。
+
+  ### 6) 定时器、取消与超时
+  - Timer 维护一个按到期时间排序的数据结构，到期时恢复协程；
+    - CancellationToken 在 await 之前与恢复之后校验中断信号；
+    - 超时通常以“定时器 + 取消”组合实现，触发后抛出异常（如 CoroutineTimeoutException）。
+
+  ### 7) 资源生命周期（FD/Handle/内存）
+  - FD 生命周期：
+      - 注册前检查 fd 上下文是否存在，首登用 EPOLL_CTL_ADD，后续使用 MOD；
+      - 关闭 fd 前先执行 EPOLL_CTL_DEL 并清理回调句柄，防止悬挂。
+    - 句柄与内存：
+      - 协程句柄由 Task 与 awaiter 管理；
+      - 小对象从 MemoryPool 获取，压力回落后可 shrink_to_fit；
+      - 所有路径使用 RAII（FdGuard/ScopeGuard）避免泄漏。
+
+  ### 8) 异常与错误传播
+    - 所有系统调用经 Safety 封装：将 errno 映射为具名异常（IOException 等），携带上下文信息；
+    - 异常在 Task 调用链中自然传播，调用者可 co_await 并 try/catch；
+    - I/O 中区分可重试错误（EAGAIN/EINTR）与致命错误（ECONNRESET 等）。
+
+  ### 9) 同步回退策略（Degradation）
+    - 触发条件：epoll 创建失败或运行中检测到不可恢复错误；
+    - 行为：async_* 转为 std::async 后台阻塞 I/O；
+    - 影响：语义等价但吞吐降低，适合受限环境与测试；
+    - 可观测性：is_sync_mode() 暴露当前模式，便于测试断言与运维告警。
+
+  ### 10) 优雅关闭（Graceful Shutdown）
+    建议顺序：
+    1. 停止对外接受新任务/连接；
+    2. 通知业务协程尽快收敛（可通过取消/自定义信号）；
+    3. IOManager 唤醒 epoll（自唤醒管道）并退出 I/O 线程循环；
+    4. Scheduler 等待工作线程 drain 并 join；
+    5. 释放内存池等资源。
+
+  ### 11) 可扩展性与配置
+    - 可插拔日志：接入 spdlog/自定义后端，支持等级与结构化输出；
+    - 多平台 I/O：抽象 I/O provider，后续支持 kqueue/IOCP/io_uring；
+    - 策略参数：
+      - 调度线程数：按 CPU 核心与任务类型配置；
+      - I/O 触发模式：保持 EPOLLET，配合“读/写到 EAGAIN”策略；
+      - 内存池大小与收缩策略；
+    - 指标：暴露执行统计、队列长度、窃取次数、I/O 错误率等，便于监控告警。
 ---
 
 ## 使用注意事项与最佳实践

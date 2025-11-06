@@ -1,5 +1,9 @@
 {
     "files.associations": {
-        "exception": "cpp"
+        "exception": "cpp",
+        "coroutine": "cpp",
+        "unordered_map": "cpp",
+        "xlocmes": "cpp",
+        "memory": "cpp"
     }
 }
