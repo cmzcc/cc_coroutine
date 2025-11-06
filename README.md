@@ -477,19 +477,20 @@ th.join();
   ### 3) I/O 事件流（Sequence）
   以 async_read 为例（epoll 模式）：
   1. 调用方 co_await io->async_read(fd, buf, sz)。
-    2. await_suspend：
-       - 将 fd 设为 O_NONBLOCK（若尚未设定）。
-       - 在 fd 上注册/修改 EPOLLIN | EPOLLET，关联当前协程句柄。
-       - 返回 true，挂起协程。
-    3. I/O 线程 epoll_wait 返回后，找到 fd 对应句柄，调用 resume。
-    4. 协程恢复后循环 read，直到读取完成或返回 EAGAIN；若未完成，重新挂起等待下一次事件；否则返回结果。
+  2. await_suspend：
+      - 将 fd 设为 O_NONBLOCK（若尚未设定）。
+      - 在 fd 上注册/修改 EPOLLIN | EPOLLET，关联当前协程句柄。
+      - 返回 true，挂起协程。
+  3. I/O 线程 epoll_wait 返回后，找到 fd 对应句柄，调用 resume。
+  4. 协程恢复后循环 read，直到读取完成或返回 EAGAIN；若未完成，重新挂起等待下一次事件；否则返回结果。
 
   async_accept/async_connect 类似：
     - accept：监听 fd 注册 EPOLLIN，事件到来后执行 accept 循环处理短连接风暴；
     - connect：非阻塞 connect 若返回 EINPROGRESS，注册 EPOLLOUT 等待写就绪，随后检查 SO_ERROR 判定成功或失败。
 
-    同步回退模式下：
-    - await_suspend 启动一个 std::async 执行阻塞 read/accept/connect；完成后在后台线程中 resume 协程，或把句柄投递回调度器队列。
+  同步回退模式下：
+    - await_suspend 启动一个 std::async 执行阻塞 read/accept/connect；
+    - 完成后在后台线程中 resume 协程，或把句柄投递回调度器队列。
 
   ### 4) Awaiter 状态机（Single-Resume Guarantee）
   状态与约束：
