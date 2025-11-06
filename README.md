@@ -485,12 +485,12 @@ th.join();
   4. 协程恢复后循环 read，直到读取完成或返回 EAGAIN；若未完成，重新挂起等待下一次事件；否则返回结果。
 
   async_accept/async_connect 类似：
-    - accept：监听 fd 注册 EPOLLIN，事件到来后执行 accept 循环处理短连接风暴；
-    - connect：非阻塞 connect 若返回 EINPROGRESS，注册 EPOLLOUT 等待写就绪，随后检查 SO_ERROR 判定成功或失败。
+   - accept：监听 fd 注册 EPOLLIN，事件到来后执行 accept 循环处理短连接风暴；
+   - connect：非阻塞 connect 若返回 EINPROGRESS，注册 EPOLLOUT 等待写就绪，随后检查 SO_ERROR 判定成功或失败。
 
   同步回退模式下：
-    - await_suspend 启动一个 std::async 执行阻塞 read/accept/connect；
-    - 完成后在后台线程中 resume 协程，或把句柄投递回调度器队列。
+   - await_suspend 启动一个 std::async 执行阻塞 read/accept/connect；
+   - 完成后在后台线程中 resume 协程，或把句柄投递回调度器队列。
 
   ### 4) Awaiter 状态机（Single-Resume Guarantee）
   状态与约束：
